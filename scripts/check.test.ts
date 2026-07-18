@@ -88,14 +88,38 @@ describe("notify — email channel end to end", () => {
     globalThis.fetch = realFetch;
     delete process.env.RESEND_API_KEY;
     delete process.env.ALERT_EMAIL_FROM;
+    delete process.env.NTFY_TOPIC;
+    delete process.env.NTFY_SERVER;
   });
 
-  test("email: channel calls Resend with built subject/body", async () => {
+  test("email: publishes to ntfy with an Email header (ntfy-native, no Resend)", async () => {
+    const calls: any[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      calls.push({ url: String(url), headers: init.headers, body: init.body });
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    process.env.NTFY_TOPIC = "mkt-topic-abc";
+    process.env.RESEND_API_KEY = "re_test_key"; // present but must NOT be used
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notify("email:you@example.com", msg);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://ntfy.sh/mkt-topic-abc");
+    expect(calls[0].headers.Email).toBe("you@example.com");
+    expect(calls[0].headers.Title).toBe("BTC-USD: below @ 90000"); // emoji stripped (latin-1 headers)
+    expect(calls[0].body).toContain("Support break");
+    // Resend must not be touched when ntfy is available
+    expect(calls.some(c => c.url.includes("api.resend.com"))).toBe(false);
+  });
+
+  test("email: falls back to Resend when no NTFY_TOPIC but RESEND_API_KEY set", async () => {
     const calls: any[] = [];
     globalThis.fetch = (async (url: any, init: any) => {
       calls.push({ url: String(url), payload: JSON.parse(init.body) });
       return new Response("{}", { status: 200 });
     }) as unknown as typeof fetch;
+    // NTFY_TOPIC intentionally unset
     process.env.RESEND_API_KEY = "re_test_key";
     process.env.ALERT_EMAIL_FROM = "alerts@agentlabs.cc";
 
@@ -104,30 +128,31 @@ describe("notify — email channel end to end", () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0].url).toBe("https://api.resend.com/emails");
-    expect(calls[0].payload.subject).toBe("🔔 BTC-USD: below @ 90000");
     expect(calls[0].payload.to).toEqual(["you@example.com"]);
     expect(calls[0].payload.text).toContain("Support break");
   });
 
-  test("multiple channels (email + ntfy) both dispatch", async () => {
-    const hits: string[] = [];
-    globalThis.fetch = (async (url: any) => {
-      hits.push(String(url));
-      return new Response("{}", { status: 200 });
+  test("multiple channels (email + ntfy push) both dispatch", async () => {
+    const hits: { url: string; email?: string }[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      hits.push({ url: String(url), email: init?.headers?.Email });
+      return new Response("", { status: 200 });
     }) as unknown as typeof fetch;
-    process.env.RESEND_API_KEY = "re_test_key";
+    process.env.NTFY_TOPIC = "mkt-topic-abc";
 
     const msg = buildAlertMessage(job(), 88000, TS);
     await notify("email:you@example.com,ntfy:my-topic", msg);
 
-    expect(hits.some(u => u.includes("api.resend.com"))).toBe(true);
-    expect(hits.some(u => u.includes("ntfy.sh/my-topic"))).toBe(true);
+    // email → ntfy topic from env, WITH Email header
+    expect(hits.some(h => h.url === "https://ntfy.sh/mkt-topic-abc" && h.email === "you@example.com")).toBe(true);
+    // ntfy push → topic from the channel spec, no Email header
+    expect(hits.some(h => h.url.includes("ntfy.sh/my-topic"))).toBe(true);
   });
 
-  test("no RESEND_API_KEY → falls back to stdout, no network call", async () => {
+  test("no NTFY_TOPIC and no RESEND_API_KEY → falls back to stdout, no network call", async () => {
     let called = false;
     globalThis.fetch = (async () => { called = true; return new Response("{}"); }) as unknown as typeof fetch;
-    // RESEND_API_KEY intentionally unset
+    // both NTFY_TOPIC and RESEND_API_KEY intentionally unset
 
     const msg = buildAlertMessage(job(), 88000, TS);
     await notify("email:you@example.com", msg);

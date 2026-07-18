@@ -272,9 +272,27 @@ export async function notifyOne(channel: string, msg: AlertMessage): Promise<voi
   }
   if (channel.startsWith("email:")) {
     const to = channel.slice("email:".length);
+    // Primary path: ntfy-native email. Publishing to the existing ntfy topic
+    // with an `Email:` header makes ntfy deliver the message as an email — no
+    // Resend account, API key, or verified domain required. Reuses NTFY_TOPIC,
+    // so email rides the same channel already deployed for phone push.
+    const topic = process.env.NTFY_TOPIC?.trim();
+    if (topic) {
+      const server = (process.env.NTFY_SERVER?.trim() || "https://ntfy.sh").replace(/\/+$/, "");
+      // HTTP headers must be latin-1: strip non-ASCII (emoji) from the Title.
+      const asciiSubject = msg.subject.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
+      const res = await fetch(`${server}/${topic}`, {
+        method: "POST",
+        headers: { "Content-Type": "text/plain", Title: asciiSubject, Email: to },
+        body: msg.body,
+      });
+      if (!res.ok) console.error(`email(ntfy): ${server}/${topic} → status ${res.status} for ${to}`);
+      return;
+    }
+    // Fallback: Resend HTTP API (heavier — needs account + API key + verified domain).
     const apiKey = process.env.RESEND_API_KEY;
     if (!apiKey) {
-      console.warn("⚠️  RESEND_API_KEY not set — falling back to stdout");
+      console.warn("⚠️  email: no NTFY_TOPIC and no RESEND_API_KEY — falling back to stdout");
       console.log(`${msg.subject}\n${msg.body}`);
       return;
     }

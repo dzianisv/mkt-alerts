@@ -15,9 +15,13 @@ function findRepoRoot(start: string): string {
   }
 }
 
-const REPO_ROOT = findRepoRoot(import.meta.dir);
-const CACHE_DIR = join(REPO_ROOT, ".cache", "mkt");
-const STORE_PATH = join(CACHE_DIR, "agent-alerts.json");
+// Store location: an explicit MKT_ALERTS_STORE env override wins (used by the
+// deployed systemd timer, which runs outside the git checkout). Otherwise fall
+// back to the repo-local .cache/mkt so state travels with the skill in dev.
+const STORE_PATH = process.env.MKT_ALERTS_STORE?.trim()
+  ? process.env.MKT_ALERTS_STORE.trim()
+  : join(findRepoRoot(import.meta.dir), ".cache", "mkt", "agent-alerts.json");
+const CACHE_DIR = dirname(STORE_PATH);
 
 export type Cond = { condition: string; value: number; period?: number };
 

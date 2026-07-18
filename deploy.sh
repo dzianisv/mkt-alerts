@@ -79,6 +79,16 @@ else
   ok "ntfy topic loaded from Bitwarden: $NTFY_TOPIC"
 fi
 
+# Alert email recipient — OPTIONAL. When present, ntfy delivers each alert as an
+# email too (native ntfy `Email:` header — no Resend/SMTP account). Add it with:
+#   bw create ... name=mkt-daemon/alert-email  (or set in Bitwarden 'dev' collection)
+ALERT_EMAIL=$(bw get password "mkt-daemon/alert-email" 2>/dev/null || true)
+if [[ -n "$ALERT_EMAIL" ]]; then
+  ok "alert email loaded from Bitwarden: $ALERT_EMAIL"
+else
+  echo "  ⚠ mkt-daemon/alert-email not set — email delivery stays off until you add it"
+fi
+
 # API token — generate once, stored ONLY in ~/.config/mkt-watch/auth.json (user secret, not BW)
 AUTH_JSON="$HOME/.config/mkt-watch/auth.json"
 if [[ -f "$AUTH_JSON" ]]; then
@@ -141,6 +151,7 @@ cat > "$TMP_ENV" <<EOF
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=@CryptoAiInvestor
 NTFY_TOPIC=${NTFY_TOPIC}
+ALERT_EMAIL=${ALERT_EMAIL}
 API_TOKEN=${API_TOKEN}
 MKT_ORIGIN=http://127.0.0.1:8080
 PORT=9000
@@ -151,7 +162,7 @@ rm -f "$TMP_ENV"
 
 # Upload api server + package.json (yaml dep)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-for f in api.ts dividend_watch.ts package.json; do
+for f in api.ts dividend_watch.ts check.ts store.ts indicators.ts package.json; do
   [[ -f "$SCRIPT_DIR/scripts/$f" ]] && SCP "$SCRIPT_DIR/scripts/$f" "/tmp/$f"
 done
 
@@ -188,8 +199,9 @@ echo "  bun: \$(bun --version)"
 # ── skill scripts + api server ────────────────────────────────────────────────
 MKT_SCRIPTS=\$HOME/.agents/skills/mkt/scripts
 mkdir -p "\$MKT_SCRIPTS"
-[[ -f /tmp/api.ts ]] && cp /tmp/api.ts "\$MKT_SCRIPTS/"
-[[ -f /tmp/dividend_watch.ts ]] && cp /tmp/dividend_watch.ts "\$MKT_SCRIPTS/"
+for f in api.ts dividend_watch.ts check.ts store.ts indicators.ts; do
+  [[ -f /tmp/\$f ]] && cp /tmp/\$f "\$MKT_SCRIPTS/"
+done
 if [[ -f /tmp/package.json ]]; then
   cp /tmp/package.json "\$MKT_SCRIPTS/"
   cd "\$MKT_SCRIPTS" && bun install --quiet
@@ -289,6 +301,47 @@ TMR
 sudo systemctl daemon-reload
 sudo systemctl enable --now dividend-watch.timer
 echo "  ✓ dividend-watch.timer enabled ($(systemctl is-enabled dividend-watch.timer 2>/dev/null))"
+
+# ── systemd: mkt-check (general price/indicator alert checker via timer) ──────
+# check.ts is the condition engine the mkt Go daemon isn't wired for here: it
+# reads alert jobs from MKT_ALERTS_STORE, pulls live prices via 'mkt mcp', and
+# notifies over each job's channel. The 'email:<addr>' channel publishes to the
+# same ntfy topic with an 'Email:' header, so ntfy sends the alert as an email —
+# no Resend/SMTP account. Runs every 15 min; no-ops when the store has no jobs.
+MKT_STORE=\$HOME/.config/mkt-watch/agent-alerts.json
+mkdir -p "\$(dirname \$MKT_STORE)"
+sudo tee /etc/systemd/system/mkt-check.service > /dev/null << SVC
+[Unit]
+Description=mkt price/indicator alert checker
+After=network-online.target mkt-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=\$U
+EnvironmentFile=/etc/mkt-daemon.env
+Environment=HOME=/home/\$U
+Environment=PATH=/home/\$U/.local/bin:/home/\$U/.bun/bin:/usr/bin:/bin
+Environment=MKT_ALERTS_STORE=/home/\$U/.config/mkt-watch/agent-alerts.json
+WorkingDirectory=/home/\$U/.agents/skills/mkt/scripts
+ExecStart=/home/\$U/.bun/bin/bun check.ts
+SVC
+
+sudo tee /etc/systemd/system/mkt-check.timer > /dev/null << TMR
+[Unit]
+Description=run mkt-check every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TMR
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now mkt-check.timer
+echo "  ✓ mkt-check.timer enabled (\$(systemctl is-enabled mkt-check.timer 2>/dev/null))"
 
 # ── cloudflared ───────────────────────────────────────────────────────────────
 if ! command -v cloudflared &>/dev/null; then

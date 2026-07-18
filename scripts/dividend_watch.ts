@@ -18,7 +18,8 @@
  *   2. UPCOMING ex-date <= N days    → last window to decide before going ex
  *   3. POST-EX price reaction        → did it drop less than the payout? (accretive)
  *
- * Env: NTFY_TOPIC, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (any subset; falls back to stdout).
+ * Env: NTFY_TOPIC, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALERT_EMAIL (any subset; falls back to stdout).
+ *      ALERT_EMAIL, when set, adds an ntfy `Email:` header so each push is also emailed.
  *      TICKERS (space/comma list, default "SITC"), UPCOMING_DAYS (default 14).
  * State: $STATE_DIR or ~/.local/state/dividend-watch/<TICKER>.json
  */
@@ -31,6 +32,9 @@ const NTFY_TOPIC = process.env.NTFY_TOPIC?.trim();
 const NTFY_SERVER = process.env.NTFY_SERVER?.trim() || "https://ntfy.sh";
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
 const TG_CHAT = process.env.TELEGRAM_CHAT_ID?.trim();
+// When set, ntfy delivers each push ALSO as an email to this address (ntfy-native
+// email — an `Email:` header on publish; no Resend/SMTP needed).
+const ALERT_EMAIL = process.env.ALERT_EMAIL?.trim();
 const STATE_DIR =
   process.env.STATE_DIR || join(homedir(), ".local/state/dividend-watch");
 const UPCOMING_DAYS = Number(process.env.UPCOMING_DAYS || 14);
@@ -64,9 +68,11 @@ async function pushNtfy(title: string, body: string, priority = "default"): Prom
   try {
     // HTTP headers must be latin-1: strip emoji/non-ASCII from Title. Emoji stays in body.
     const asciiTitle = title.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
+    const headers: Record<string, string> = { Title: asciiTitle, Priority: priority, Tags: "moneybag" };
+    if (ALERT_EMAIL) headers.Email = ALERT_EMAIL; // ntfy-native email fan-out
     await fetch(`${NTFY_SERVER}/${NTFY_TOPIC}`, {
       method: "POST",
-      headers: { Title: asciiTitle, Priority: priority, Tags: "moneybag" },
+      headers,
       body,
     });
   } catch (e) {
