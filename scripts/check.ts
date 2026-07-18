@@ -168,16 +168,77 @@ async function fetchCloses(symbol: string, limit = 60): Promise<number[]> {
   throw new Error(`could not fetch closes for ${symbol}`);
 }
 
-/** Send notification over the configured channel. */
-async function notify(channel: string, message: string): Promise<void> {
+// ── Message building ────────────────────────────────────────────────────────
+//
+// A fired alert produces one AlertMessage. `text` is the compact single-string
+// form used by push channels (stdout/ntfy/telegram/telegram-bot). Email uses
+// `subject` (symbol + condition) and `body` (reason + current value + trigger)
+// so the thesis survives in an inbox-friendly shape.
+
+export type AlertMessage = { subject: string; body: string; text: string };
+
+/** Pure: build subject/body/text for a fired job. Exported for tests. */
+export function buildAlertMessage(job: AlertJob, price: number, isoTs: string): AlertMessage {
+  const trigger = job.conditions.map(c => `${c.condition} @ ${c.value}`).join(" AND ");
+  const subject = `🔔 ${job.symbol}: ${trigger}`;
+
+  const bodyLines = [
+    `${job.symbol} alert fired at ${isoTs}`,
+    ``,
+    `Trigger:  ${trigger}`,
+    `Current:  ${price}`,
+    ``,
+    `Why: ${job.reasoning}`,
+  ];
+  if (job.analysisLink) bodyLines.push(``, `Analysis: ${job.analysisLink}`);
+  const body = bodyLines.join("\n");
+
+  // Compact form kept ~backward-compatible with the previous ntfy/telegram text.
+  const text =
+    `🔔 mkt alert — ${job.symbol} fired @ ${price} (${isoTs})\n` +
+    `Conditions: ${trigger}\n` +
+    `WHY: ${job.reasoning}` +
+    (job.analysisLink ? `\n📊 Analysis: ${job.analysisLink}` : "");
+
+  return { subject, body, text };
+}
+
+// ── Email transport (Resend HTTP API) ─────────────────────────────────────────
+
+export type EmailOpts = {
+  to: string;
+  subject: string;
+  body: string;
+  apiKey: string;
+  from: string;
+  /** Injectable for tests — defaults to global fetch. */
+  fetchImpl?: typeof fetch;
+};
+
+/**
+ * Send one email via Resend. Pure w.r.t. env: caller supplies apiKey/from and
+ * may inject fetchImpl so tests assert the payload without a real send.
+ */
+export async function sendEmail(opts: EmailOpts): Promise<{ ok: boolean; status: number }> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const res = await doFetch("https://api.resend.com/emails", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${opts.apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ from: opts.from, to: [opts.to], subject: opts.subject, text: opts.body }),
+  });
+  return { ok: res.ok, status: res.status };
+}
+
+/** Send a fired alert over one channel spec (single prefix:value token). */
+export async function notifyOne(channel: string, msg: AlertMessage): Promise<void> {
   if (channel === "stdout") {
-    console.log(message);
+    console.log(msg.text);
     return;
   }
   if (channel.startsWith("telegram:")) {
     const target = channel.slice("telegram:".length);
     const proc = Bun.spawn(
-      ["python3", `${process.env.HOME}/.agents/skills/telegram-cli/telegram-cli.py`, "send", target, message],
+      ["python3", `${process.env.HOME}/.agents/skills/telegram-cli/telegram-cli.py`, "send", target, msg.text],
       { stdout: "inherit", stderr: "inherit" }
     );
     await proc.exited;
@@ -187,8 +248,8 @@ async function notify(channel: string, message: string): Promise<void> {
     const topic = channel.slice("ntfy:".length);
     await fetch(`https://ntfy.sh/${topic}`, {
       method: "POST",
-      body: message,
-      headers: { "Content-Type": "text/plain" },
+      body: msg.text,
+      headers: { "Content-Type": "text/plain", Title: msg.subject },
     });
     return;
   }
@@ -199,13 +260,13 @@ async function notify(channel: string, message: string): Promise<void> {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     if (!token) {
       console.error("telegram-bot: TELEGRAM_BOT_TOKEN not set, falling back to stdout");
-      console.log(message);
+      console.log(msg.text);
       return;
     }
     await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ chat_id: chatId, text: message }),
+      body: JSON.stringify({ chat_id: chatId, text: msg.text }),
     });
     return;
   }
@@ -214,20 +275,31 @@ async function notify(channel: string, message: string): Promise<void> {
     const apiKey = process.env.RESEND_API_KEY;
     if (!apiKey) {
       console.warn("⚠️  RESEND_API_KEY not set — falling back to stdout");
-      console.log(message);
+      console.log(`${msg.subject}\n${msg.body}`);
       return;
     }
-    const from = process.env.EMAIL_FROM ?? "alerts@resend.dev";
-    const subjectMatch = message.match(/^🔔 mkt alert — (\S+)/);
-    const subject = subjectMatch ? `🔔 mkt alert — ${subjectMatch[1]}` : "🔔 mkt alert";
-    await fetch("https://api.resend.com/emails", {
-      method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ from, to: [to], subject, text: message }),
-    });
+    const from = process.env.ALERT_EMAIL_FROM ?? process.env.EMAIL_FROM ?? "alerts@resend.dev";
+    const { ok, status } = await sendEmail({ to, subject: msg.subject, body: msg.body, apiKey, from });
+    if (!ok) console.error(`email: Resend returned ${status} for ${to}`);
     return;
   }
-  console.log(`[channel:${channel}] ${message}`);
+  console.log(`[channel:${channel}] ${msg.text}`);
+}
+
+/**
+ * Send a fired alert over the job's configured channel(s).
+ * Multiple channels are comma-separated, e.g. "email:you@x.com,telegram-bot:@chan".
+ */
+export async function notify(channelSpec: string, msg: AlertMessage): Promise<void> {
+  const channels = channelSpec.split(",").map(s => s.trim()).filter(Boolean);
+  if (!channels.length) { console.log(msg.text); return; }
+  for (const channel of channels) {
+    try {
+      await notifyOne(channel, msg);
+    } catch (e) {
+      console.error(`[notify] channel "${channel}" failed: ${e}`);
+    }
+  }
 }
 
 /** True when the condition needs historical closes (indicators). */
@@ -282,11 +354,7 @@ async function main() {
 
     if (fires) {
       const ts = now.toISOString();
-      const msg =
-        `🔔 mkt alert — ${job.symbol} fired @ ${data.price} (${ts})\n` +
-        `Conditions: ${detail}\n` +
-        `WHY: ${job.reasoning}` +
-        (job.analysisLink ? `\n📊 Analysis: ${job.analysisLink}` : "");
+      const msg = buildAlertMessage(job, data.price, ts);
 
       console.log(`[${job.id}] FIRED — ${detail}`);
 
@@ -295,7 +363,8 @@ async function main() {
         markFired(job.id, ts);
       } else {
         console.log(`  [dry-run] would notify ${job.channel}:`);
-        console.log(`  ${msg.replace(/\n/g, "\n  ")}`);
+        console.log(`  subject: ${msg.subject}`);
+        console.log(`  ${msg.body.replace(/\n/g, "\n  ")}`);
       }
     } else {
       console.log(`[${job.id}] no-fire (${detail})`);
@@ -303,4 +372,6 @@ async function main() {
   }
 }
 
-main().catch(e => { console.error(e); process.exit(1); });
+if (import.meta.main) {
+  main().catch(e => { console.error(e); process.exit(1); });
+}

@@ -1,5 +1,6 @@
 *.env
 .env*
+!.env.example
 *.key
 *.pem
 scripts/node_modules/

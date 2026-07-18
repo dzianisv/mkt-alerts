@@ -86,6 +86,7 @@ type AlertMeta = {
   reason: string;
   analysisLink?: string;
   desk?: string;
+  channels?: string[];
   createdAt: string;
   enabled: boolean;
 };
@@ -293,7 +294,8 @@ async function handlePostAlert(req: Request): Promise<Response> {
   try { body = await req.json(); }
   catch { return json({ error: "invalid JSON" }, 400); }
 
-  const { symbol, conditions, match, reason, analysisLink, desk } = body;
+  const { symbol, conditions, match, reason, analysisLink, desk, channels } = body as
+    Partial<AlertMeta & { reason: string }>;
 
   if (!symbol?.trim())          return json({ error: "symbol required" }, 400);
   if (!conditions?.length)      return json({ error: "conditions required (non-empty array)" }, 400);
@@ -304,14 +306,24 @@ async function handlePostAlert(req: Request): Promise<Response> {
       return json({ error: `invalid condition: ${c.condition}` }, 400);
   }
 
+  const CHANNEL_PREFIXES = ["email:", "telegram:", "telegram-bot:", "ntfy:", "stdout"];
+  if (channels) {
+    if (!Array.isArray(channels)) return json({ error: "channels must be an array" }, 400);
+    for (const ch of channels) {
+      if (typeof ch !== "string" || !CHANNEL_PREFIXES.some(p => ch === p || ch.startsWith(p)))
+        return json({ error: `invalid channel: ${ch}` }, 400);
+    }
+  }
+
   const newMeta: AlertMeta = {
     id: crypto.randomUUID(),
     symbol,
     conditions,
-    ...(match        ? { match }        : {}),
+    ...(match             ? { match }        : {}),
     reason,
-    ...(analysisLink ? { analysisLink } : {}),
-    ...(desk         ? { desk }         : {}),
+    ...(analysisLink      ? { analysisLink } : {}),
+    ...(desk              ? { desk }         : {}),
+    ...(channels?.length  ? { channels }     : {}),
     createdAt: new Date().toISOString(),
     enabled: true,
   };

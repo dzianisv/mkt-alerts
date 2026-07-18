@@ -155,11 +155,37 @@ Support break — exit signal
 **To use a different bot:** create one via [@BotFather](https://t.me/BotFather), add the token to Bitwarden as `mkt-daemon/telegram-bot-token`, redeploy.
 
 ### Email
-Not yet wired. To add: set `RESEND_API_KEY` in Bitwarden as `mkt-daemon/resend-api-key`, then use:
+Delivered via the [Resend](https://resend.com) HTTP API (free tier: 3,000 emails/month).
+
 ```bash
 --channel email:you@example.com
 ```
-Requires a free [Resend](https://resend.com) account (3,000 emails/month free).
+
+**Subject** = symbol + condition (`🔔 BTC-USD: below @ 90000`).
+**Body** = the alert's thesis + current value + trigger + analysis link:
+```
+BTC-USD alert fired at 2026-07-18T12:34:56.000Z
+
+Trigger:  below @ 90000
+Current:  88123.45
+
+Why: Support break — invalidates bull thesis
+Analysis: https://notion.so/...
+```
+
+**Required env vars** (set where the `check.ts` checker runs — see `.env.example`):
+
+| Var | Purpose |
+|---|---|
+| `RESEND_API_KEY` | Resend API key. Store in Bitwarden as `mkt-daemon/resend-api-key`. |
+| `ALERT_EMAIL_FROM` | Verified sender, e.g. `alerts@agentlabs.cc`. Falls back to `EMAIL_FROM`, then the Resend sandbox `alerts@resend.dev` (testing only). |
+
+Without `RESEND_API_KEY` the alert falls back to stdout (never silently dropped).
+
+**Multiple channels** on one alert — repeat `--channel` (delivers to all):
+```bash
+--channel email:you@example.com --channel telegram-bot:@CryptoAiInvestor
+```
 
 ### ntfy (no account needed)
 ```bash

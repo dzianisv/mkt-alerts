@@ -1,0 +1,136 @@
+#!/usr/bin/env bun
+// Unit tests for the alert dispatch layer. Run: bun test scripts/check.test.ts
+// No real emails/pushes are sent — the transport fetch is mocked.
+
+import { test, expect, describe, afterEach } from "bun:test";
+import { buildAlertMessage, sendEmail, notify, type AlertMessage } from "./check.ts";
+import type { AlertJob } from "./store.ts";
+
+function job(overrides: Partial<AlertJob> = {}): AlertJob {
+  return {
+    id: "btc-below-90000-abcd",
+    desk: "crypto",
+    symbol: "BTC-USD",
+    conditions: [{ condition: "below", value: 90000 }],
+    reasoning: "Support break — invalidates bull thesis",
+    channel: "email:you@example.com",
+    created: "2026-07-18T00:00:00.000Z",
+    ...overrides,
+  };
+}
+
+const TS = "2026-07-18T12:34:56.000Z";
+
+describe("buildAlertMessage", () => {
+  test("subject is symbol + condition", () => {
+    const m = buildAlertMessage(job(), 88123.45, TS);
+    expect(m.subject).toBe("🔔 BTC-USD: below @ 90000");
+  });
+
+  test("body carries reason, current value and trigger", () => {
+    const m = buildAlertMessage(job({ analysisLink: "https://notion.so/x" }), 88123.45, TS);
+    expect(m.body).toContain("Why: Support break — invalidates bull thesis"); // thesis
+    expect(m.body).toContain("Current:  88123.45");                            // current value
+    expect(m.body).toContain("Trigger:  below @ 90000");                       // trigger
+    expect(m.body).toContain("Analysis: https://notion.so/x");                 // link
+  });
+
+  test("compound conditions join with AND", () => {
+    const m = buildAlertMessage(
+      job({ conditions: [{ condition: "rsi_below", value: 30 }, { condition: "below", value: 200 }] }),
+      195,
+      TS
+    );
+    expect(m.subject).toBe("🔔 BTC-USD: rsi_below @ 30 AND below @ 200");
+  });
+});
+
+describe("sendEmail (mocked transport)", () => {
+  test("posts the right Resend payload without a real send", async () => {
+    let captured: { url: string; init: RequestInit } | null = null;
+    const fetchImpl = (async (url: any, init: any) => {
+      captured = { url: String(url), init };
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const res = await sendEmail({
+      to: "you@example.com",
+      subject: "🔔 BTC-USD: below @ 90000",
+      body: "Why: Support break",
+      apiKey: "re_test_key",
+      from: "alerts@agentlabs.cc",
+      fetchImpl,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(captured!.url).toBe("https://api.resend.com/emails");
+    expect((captured!.init.headers as any).Authorization).toBe("Bearer re_test_key");
+    const payload = JSON.parse(captured!.init.body as string);
+    expect(payload.from).toBe("alerts@agentlabs.cc");
+    expect(payload.to).toEqual(["you@example.com"]);
+    expect(payload.subject).toBe("🔔 BTC-USD: below @ 90000");
+    expect(payload.text).toBe("Why: Support break");
+  });
+
+  test("propagates a non-ok status", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 422 })) as unknown as typeof fetch;
+    const res = await sendEmail({
+      to: "x@y.com", subject: "s", body: "b", apiKey: "k", from: "f@g.com", fetchImpl,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(422);
+  });
+});
+
+describe("notify — email channel end to end", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    delete process.env.RESEND_API_KEY;
+    delete process.env.ALERT_EMAIL_FROM;
+  });
+
+  test("email: channel calls Resend with built subject/body", async () => {
+    const calls: any[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      calls.push({ url: String(url), payload: JSON.parse(init.body) });
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    process.env.RESEND_API_KEY = "re_test_key";
+    process.env.ALERT_EMAIL_FROM = "alerts@agentlabs.cc";
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notify("email:you@example.com", msg);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.resend.com/emails");
+    expect(calls[0].payload.subject).toBe("🔔 BTC-USD: below @ 90000");
+    expect(calls[0].payload.to).toEqual(["you@example.com"]);
+    expect(calls[0].payload.text).toContain("Support break");
+  });
+
+  test("multiple channels (email + ntfy) both dispatch", async () => {
+    const hits: string[] = [];
+    globalThis.fetch = (async (url: any) => {
+      hits.push(String(url));
+      return new Response("{}", { status: 200 });
+    }) as unknown as typeof fetch;
+    process.env.RESEND_API_KEY = "re_test_key";
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notify("email:you@example.com,ntfy:my-topic", msg);
+
+    expect(hits.some(u => u.includes("api.resend.com"))).toBe(true);
+    expect(hits.some(u => u.includes("ntfy.sh/my-topic"))).toBe(true);
+  });
+
+  test("no RESEND_API_KEY → falls back to stdout, no network call", async () => {
+    let called = false;
+    globalThis.fetch = (async () => { called = true; return new Response("{}"); }) as unknown as typeof fetch;
+    // RESEND_API_KEY intentionally unset
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notify("email:you@example.com", msg);
+    expect(called).toBe(false);
+  });
+});
