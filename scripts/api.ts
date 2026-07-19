@@ -217,6 +217,21 @@ function checkerChannels(channels: string[] | undefined, globalTopic: string): s
     });
 }
 
+// Whether an alert should be projected into the Go daemon's config.yaml.
+//
+// The daemon fires every rule in its config and delivers a push to its ONE global
+// ntfy topic. So a rule belongs in the config ONLY when the operator actually wants
+// that global push: either the default (no channels specified) or an explicit
+// ntfy:<globalTopic>. An alert whose routes are EXCLUSIVELY checker-managed —
+// email:, telegram:, telegram-bot:, stdout, or ntfy:<some other topic> — must NOT
+// be added to the config, or the daemon would fire an unwanted global push on top
+// of the checker's targeted delivery. Such alerts live only in meta (for GET/list
+// + DELETE) and the checker store (for delivery).
+function daemonShouldProject(channels: string[] | undefined, globalTopic: string): boolean {
+  if (!channels?.length) return true; // default push — daemon owns it
+  return channels.some(ch => ch.trim() === `ntfy:${globalTopic}`);
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 function authorized(req: Request): boolean {
@@ -334,11 +349,19 @@ export async function handlePostAlert(req: Request): Promise<Response> {
       return json({ error: `invalid condition: ${c.condition}` }, 400);
   }
 
-  const CHANNEL_PREFIXES = ["email:", "telegram:", "telegram-bot:", "ntfy:", "stdout"];
+  const CHANNEL_PREFIXES = ["email:", "telegram:", "telegram-bot:", "ntfy:"];
   if (channels) {
     if (!Array.isArray(channels)) return json({ error: "channels must be an array" }, 400);
     for (const ch of channels) {
-      if (typeof ch !== "string" || !CHANNEL_PREFIXES.some(p => ch === p || ch.startsWith(p)))
+      if (typeof ch !== "string") return json({ error: `invalid channel: ${ch}` }, 400);
+      const t = ch.trim();
+      // `stdout` is the only bare (prefixless) channel. Every prefixed channel
+      // MUST carry a non-empty target — a bare `ntfy:`/`email:` would otherwise
+      // pass here, post to an empty destination, and still be marked fired,
+      // silently dropping the alert.
+      if (t === "stdout") continue;
+      const prefix = CHANNEL_PREFIXES.find(p => t.startsWith(p));
+      if (!prefix || t.length <= prefix.length)
         return json({ error: `invalid channel: ${ch}` }, 400);
     }
   }
@@ -366,19 +389,16 @@ export async function handlePostAlert(req: Request): Promise<Response> {
   // Routes the Go daemon cannot deliver (email etc.) must be mirrored into the
   // checker store, keyed by the SAME id as the meta entry so DELETE removes both.
   const mirrorChannels = checkerChannels(channels, NTFY_TOPIC);
+  // Whether this alert belongs in the daemon's config (default/global-push routes).
+  const projectToDaemon = daemonShouldProject(channels, NTFY_TOPIC);
 
-  await withLock(async () => {
-    const meta = loadMeta();
-    meta.push(newMeta);
-    saveMeta(meta);
-    console.log(`[alerts] created ${newMeta.id} for ${symbol}`);
-
-    const cfg = loadMktConfig();
-    cfg.alerts = [...(cfg.alerts ?? []), newRule];
-    saveMktConfig(cfg);
-
-    if (mirrorChannels.length) {
-      try {
+  try {
+    await withLock(async () => {
+      // Persist the checker mirror FIRST. For a checker-only alert this is the ONLY
+      // delivery path; if it fails (corrupt store / lock timeout) we must NOT report
+      // success and leave an alert that can never fire. Doing it first also means a
+      // failure leaves no orphan meta/config entry to reconcile.
+      if (mirrorChannels.length) {
         addJob(
           {
             desk: desk ?? "crypto",
@@ -394,13 +414,32 @@ export async function handlePostAlert(req: Request): Promise<Response> {
           { id: newMeta.id },
         );
         console.log(`[alerts] mirrored ${newMeta.id} into checker store for ${mirrorChannels.join(",")}`);
-      } catch (e) {
-        console.error(`[alerts] checker-store mirror failed for ${newMeta.id}:`, e);
       }
-    }
-  });
 
-  await restartMkt();
+      const meta = loadMeta();
+      meta.push(newMeta);
+      saveMeta(meta);
+      console.log(`[alerts] created ${newMeta.id} for ${symbol}`);
+
+      // Only project to the daemon config when the operator wants the global push.
+      // A checker-only alert (email/telegram/non-global ntfy) is deliberately kept
+      // out of config.yaml to avoid a duplicate global ntfy push from the daemon.
+      if (projectToDaemon) {
+        const cfg = loadMktConfig();
+        cfg.alerts = [...(cfg.alerts ?? []), newRule];
+        saveMktConfig(cfg);
+      } else {
+        console.log(`[alerts] ${newMeta.id} is checker-only (${(channels ?? []).join(",")}) — not projected to daemon config`);
+      }
+    });
+  } catch (e) {
+    console.error(`[alerts] failed to persist ${newMeta.id}:`, e);
+    return json({ error: "failed to persist alert" }, 500);
+  }
+
+  // Restart the daemon only when its config actually changed — a checker-only
+  // alert never touches config.yaml, so there is nothing to reload.
+  if (projectToDaemon) await restartMkt();
   // Include `reasoning` (mirrors `reason`) so the CLI, which reads `job.reasoning`,
   // displays the thesis it just set.
   return json({ ...newMeta, reasoning: reason }, 201);
@@ -408,29 +447,47 @@ export async function handlePostAlert(req: Request): Promise<Response> {
 
 export async function handleDeleteAlert(id: string): Promise<Response> {
   let removed = false;
+  let configChanged = false;
 
-  await withLock(async () => {
-    const meta = loadMeta();
-    const idx  = meta.findIndex(m => m.id === id);
-    if (idx === -1) return;
+  try {
+    await withLock(async () => {
+      const meta = loadMeta();
+      const idx  = meta.findIndex(m => m.id === id);
+      if (idx === -1) return;
+      const target = meta[idx];
 
-    const target = meta[idx];
-    meta.splice(idx, 1);
-    saveMeta(meta);
-    console.log(`[alerts] removed ${id} (${target.symbol})`);
+      // Remove the mirrored checker job FIRST. If a later step fails, a leftover
+      // meta entry is harmless (it just won't fire), whereas a leftover checker
+      // job would keep firing after the alert was "deleted". Idempotent — a no-op
+      // when the alert had no daemon-undeliverable routes and so was never mirrored.
+      removeJob(id);
 
-    const cfg = loadMktConfig();
-    cfg.alerts = (cfg.alerts ?? []).filter(r => !conditionsMatch(r, target));
-    saveMktConfig(cfg);
+      meta.splice(idx, 1);
+      saveMeta(meta);
+      console.log(`[alerts] removed ${id} (${target.symbol})`);
 
-    // Remove the mirrored checker job (same id). Idempotent — a no-op if the
-    // alert had no daemon-undeliverable routes and so was never mirrored.
-    removeJob(id);
-    removed = true;
-  });
+      // Only touch the daemon config for alerts that were actually projected to it.
+      // A checker-only alert was never in config.yaml; filtering it out anyway could
+      // strip a DIFFERENT alert that happens to share the same symbol + conditions.
+      if (daemonShouldProject(target.channels, NTFY_TOPIC)) {
+        const cfg = loadMktConfig();
+        const before = (cfg.alerts ?? []).length;
+        cfg.alerts = (cfg.alerts ?? []).filter(r => !conditionsMatch(r, target));
+        if (cfg.alerts.length !== before) {
+          saveMktConfig(cfg);
+          configChanged = true;
+        }
+      }
+
+      removed = true;
+    });
+  } catch (e) {
+    console.error(`[alerts] failed to delete ${id}:`, e);
+    return json({ error: "failed to delete alert" }, 500);
+  }
 
   if (!removed) return json({ error: "not found" }, 404);
-  await restartMkt();
+  if (configChanged) await restartMkt();
   return json({ removed: id });
 }
 
