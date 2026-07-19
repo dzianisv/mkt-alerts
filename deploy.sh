@@ -100,6 +100,19 @@ else
   echo "  ⚠ mkt-daemon/ntfy-token not set — ntfy blocks anonymous email; email stays off (push still works)"
 fi
 
+# Brevo transactional email API key — PRIMARY email transport. When set, the
+# email:<addr> channel (check.ts) and dividend-watch send via Brevo's HTTP API
+# (POST https://api.brevo.com/v3/smtp/email) instead of ntfy-email/Resend. Free
+# tier ~300 emails/day (adds a "Sent with Brevo" footer). Sender = ALERT_EMAIL_FROM,
+# falling back to ALERT_EMAIL. Store as Bitwarden item 'mkt-daemon/brevo-api-key'.
+# Unset → email falls back to ntfy-native email, then Resend.
+BREVO_API_KEY=$(bw get password "mkt-daemon/brevo-api-key" 2>/dev/null || true)
+if [[ -n "$BREVO_API_KEY" ]]; then
+  ok "Brevo API key loaded from Bitwarden (email delivery via Brevo)"
+else
+  echo "  ⚠ mkt-daemon/brevo-api-key not set — email falls back to ntfy-email/Resend"
+fi
+
 # API token — generate once, stored ONLY in ~/.config/mkt-watch/auth.json (user secret, not BW)
 AUTH_JSON="$HOME/.config/mkt-watch/auth.json"
 if [[ -f "$AUTH_JSON" ]]; then
@@ -164,6 +177,8 @@ TELEGRAM_CHAT_ID=@CryptoAiInvestor
 NTFY_TOPIC=${NTFY_TOPIC}
 NTFY_TOKEN=${NTFY_TOKEN}
 ALERT_EMAIL=${ALERT_EMAIL}
+ALERT_EMAIL_FROM=${ALERT_EMAIL}
+BREVO_API_KEY=${BREVO_API_KEY}
 API_TOKEN=${API_TOKEN}
 MKT_ORIGIN=http://127.0.0.1:8080
 PORT=9000

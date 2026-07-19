@@ -3,7 +3,7 @@
 // No real emails/pushes are sent — the transport fetch is mocked.
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { buildAlertMessage, sendEmail, notify, type AlertMessage } from "./check.ts";
+import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, type AlertMessage } from "./check.ts";
 import type { AlertJob } from "./store.ts";
 
 function job(overrides: Partial<AlertJob> = {}): AlertJob {
@@ -42,6 +42,44 @@ describe("buildAlertMessage", () => {
       TS
     );
     expect(m.subject).toBe("🔔 BTC-USD: rsi_below @ 30 AND below @ 200");
+  });
+});
+
+describe("sendBrevoEmail (mocked transport)", () => {
+  test("posts the right Brevo payload without a real send", async () => {
+    let captured: { url: string; init: RequestInit } | null = null;
+    const fetchImpl = (async (url: any, init: any) => {
+      captured = { url: String(url), init };
+      return new Response("{}", { status: 201 });
+    }) as unknown as typeof fetch;
+
+    const res = await sendBrevoEmail({
+      to: "you@example.com",
+      subject: "🔔 BTC-USD: below @ 90000",
+      body: "Why: Support break",
+      apiKey: "xkeysib_test_key",
+      from: "alerts@agentlabs.cc",
+      fetchImpl,
+    });
+
+    expect(res.ok).toBe(true);
+    expect(captured!.url).toBe("https://api.brevo.com/v3/smtp/email");
+    expect((captured!.init.headers as any)["api-key"]).toBe("xkeysib_test_key");
+    expect((captured!.init.headers as any)["content-type"]).toBe("application/json");
+    const payload = JSON.parse(captured!.init.body as string);
+    expect(payload.sender).toEqual({ email: "alerts@agentlabs.cc" });
+    expect(payload.to).toEqual([{ email: "you@example.com" }]);
+    expect(payload.subject).toBe("🔔 BTC-USD: below @ 90000");
+    expect(payload.textContent).toBe("Why: Support break");
+  });
+
+  test("propagates a non-ok status", async () => {
+    const fetchImpl = (async () => new Response("nope", { status: 401 })) as unknown as typeof fetch;
+    const res = await sendBrevoEmail({
+      to: "x@y.com", subject: "s", body: "b", apiKey: "k", from: "f@g.com", fetchImpl,
+    });
+    expect(res.ok).toBe(false);
+    expect(res.status).toBe(401);
   });
 });
 
@@ -86,10 +124,56 @@ describe("notify — email channel end to end", () => {
   const realFetch = globalThis.fetch;
   afterEach(() => {
     globalThis.fetch = realFetch;
+    delete process.env.BREVO_API_KEY;
+    delete process.env.ALERT_EMAIL;
     delete process.env.RESEND_API_KEY;
     delete process.env.ALERT_EMAIL_FROM;
     delete process.env.NTFY_TOPIC;
     delete process.env.NTFY_SERVER;
+  });
+
+  test("email: sends via Brevo when BREVO_API_KEY set (primary, over ntfy + Resend)", async () => {
+    const calls: any[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      calls.push({ url: String(url), headers: init.headers, body: init.body });
+      return new Response("{}", { status: 201 });
+    }) as unknown as typeof fetch;
+    process.env.BREVO_API_KEY = "xkeysib_test_key";
+    process.env.ALERT_EMAIL_FROM = "alerts@agentlabs.cc";
+    // ntfy + Resend both present but must NOT be used — Brevo wins
+    process.env.NTFY_TOPIC = "mkt-topic-abc";
+    process.env.RESEND_API_KEY = "re_test_key";
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notify("email:you@example.com", msg);
+
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe("https://api.brevo.com/v3/smtp/email");
+    expect(calls[0].headers["api-key"]).toBe("xkeysib_test_key");
+    const payload = JSON.parse(calls[0].body);
+    expect(payload.sender).toEqual({ email: "alerts@agentlabs.cc" });
+    expect(payload.to).toEqual([{ email: "you@example.com" }]);
+    expect(payload.subject).toBe("🔔 BTC-USD: below @ 90000");
+    expect(payload.textContent).toContain("Support break");
+    // neither fallback touched
+    expect(calls.some(c => c.url.includes("ntfy.sh"))).toBe(false);
+    expect(calls.some(c => c.url.includes("api.resend.com"))).toBe(false);
+  });
+
+  test("email: Brevo sender falls back to ALERT_EMAIL when ALERT_EMAIL_FROM unset", async () => {
+    const calls: any[] = [];
+    globalThis.fetch = (async (url: any, init: any) => {
+      calls.push({ url: String(url), body: init.body });
+      return new Response("{}", { status: 201 });
+    }) as unknown as typeof fetch;
+    process.env.BREVO_API_KEY = "xkeysib_test_key";
+    process.env.ALERT_EMAIL = "sender@agentlabs.cc";
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notify("email:you@example.com", msg);
+
+    expect(calls).toHaveLength(1);
+    expect(JSON.parse(calls[0].body).sender).toEqual({ email: "sender@agentlabs.cc" });
   });
 
   test("email: publishes to ntfy with an Email header (ntfy-native, no Resend)", async () => {

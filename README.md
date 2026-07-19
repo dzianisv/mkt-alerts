@@ -155,11 +155,18 @@ Support break — exit signal
 **To use a different bot:** create one via [@BotFather](https://t.me/BotFather), add the token to Bitwarden as `mkt-daemon/telegram-bot-token`, redeploy.
 
 ### Email
-Delivered via the [Resend](https://resend.com) HTTP API (free tier: 3,000 emails/month).
+Delivered via the [Brevo](https://www.brevo.com) transactional email HTTP API — a
+plain `POST https://api.brevo.com/v3/smtp/email` (matching how alerts already POST
+to Telegram/ntfy). No verified domain required, just a validated sender.
+**Free tier: ~300 emails/day; Brevo free appends a "Sent with Brevo" footer.**
 
 ```bash
 --channel email:you@example.com
 ```
+
+Email transport is layered — the first one configured wins:
+**Brevo** (`BREVO_API_KEY`) → **ntfy-native email** (`NTFY_TOPIC` + `Email:` header)
+→ **Resend** (`RESEND_API_KEY`) → **stdout** (never silently dropped).
 
 **Subject** = symbol + condition (`🔔 BTC-USD: below @ 90000`).
 **Body** = the alert's thesis + current value + trigger + analysis link:
@@ -177,10 +184,13 @@ Analysis: https://notion.so/...
 
 | Var | Purpose |
 |---|---|
-| `RESEND_API_KEY` | Resend API key. Store in Bitwarden as `mkt-daemon/resend-api-key`. |
-| `ALERT_EMAIL_FROM` | Verified sender, e.g. `alerts@agentlabs.cc`. Falls back to `EMAIL_FROM`, then the Resend sandbox `alerts@resend.dev` (testing only). |
+| `BREVO_API_KEY` | Brevo transactional email API key (primary transport). Store in Bitwarden as `mkt-daemon/brevo-api-key`. ~300 emails/day free. |
+| `ALERT_EMAIL_FROM` | Brevo/Resend sender, e.g. `alerts@agentlabs.cc` — must be a validated Brevo sender. Falls back to `ALERT_EMAIL`. |
+| `RESEND_API_KEY` | *(fallback only)* Resend API key, used when `BREVO_API_KEY` and `NTFY_TOPIC` are both unset. Store in Bitwarden as `mkt-daemon/resend-api-key`. |
 
-Without `RESEND_API_KEY` the alert falls back to stdout (never silently dropped).
+With none of `BREVO_API_KEY` / `NTFY_TOPIC` / `RESEND_API_KEY` set, the alert falls back to stdout (never silently dropped).
+
+`deploy.sh` loads `mkt-daemon/brevo-api-key` and `mkt-daemon/alert-email` from Bitwarden and ships them into `/etc/mkt-daemon.env` alongside the other daemon vars.
 
 **Multiple channels** on one alert — repeat `--channel` (delivers to all):
 ```bash

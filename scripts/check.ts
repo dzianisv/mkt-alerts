@@ -173,7 +173,9 @@ async function fetchCloses(symbol: string, limit = 60): Promise<number[]> {
 // A fired alert produces one AlertMessage. `text` is the compact single-string
 // form used by push channels (stdout/ntfy/telegram/telegram-bot). Email uses
 // `subject` (symbol + condition) and `body` (reason + current value + trigger)
-// so the thesis survives in an inbox-friendly shape.
+// so the thesis survives in an inbox-friendly shape. Email transport is layered:
+// Brevo (primary, BREVO_API_KEY) → ntfy-native email (NTFY_TOPIC) → Resend
+// (RESEND_API_KEY) → stdout.
 
 export type AlertMessage = { subject: string; body: string; text: string };
 
@@ -203,7 +205,7 @@ export function buildAlertMessage(job: AlertJob, price: number, isoTs: string): 
   return { subject, body, text };
 }
 
-// ── Email transport (Resend HTTP API) ─────────────────────────────────────────
+// ── Email transports ──────────────────────────────────────────────────────────
 
 export type EmailOpts = {
   to: string;
@@ -216,8 +218,31 @@ export type EmailOpts = {
 };
 
 /**
- * Send one email via Resend. Pure w.r.t. env: caller supplies apiKey/from and
- * may inject fetchImpl so tests assert the payload without a real send.
+ * Send one email via Brevo's transactional email HTTP API — the PRIMARY email
+ * transport. Plain POST, matching how the repo already sends Telegram/ntfy. Pure
+ * w.r.t. env: caller supplies apiKey/from and may inject fetchImpl so tests
+ * assert the payload without a real send. Brevo free tier is ~300 emails/day and
+ * appends a "Sent with Brevo" footer.
+ */
+export async function sendBrevoEmail(opts: EmailOpts): Promise<{ ok: boolean; status: number }> {
+  const doFetch = opts.fetchImpl ?? fetch;
+  const res = await doFetch("https://api.brevo.com/v3/smtp/email", {
+    method: "POST",
+    headers: { "api-key": opts.apiKey, "content-type": "application/json" },
+    body: JSON.stringify({
+      sender: { email: opts.from },
+      to: [{ email: opts.to }],
+      subject: opts.subject,
+      textContent: opts.body,
+    }),
+  });
+  return { ok: res.ok, status: res.status };
+}
+
+/**
+ * Send one email via Resend. FALLBACK transport (used only when Brevo and ntfy
+ * are both unavailable). Pure w.r.t. env: caller supplies apiKey/from and may
+ * inject fetchImpl so tests assert the payload without a real send.
  */
 export async function sendEmail(opts: EmailOpts): Promise<{ ok: boolean; status: number }> {
   const doFetch = opts.fetchImpl ?? fetch;
@@ -272,7 +297,20 @@ export async function notifyOne(channel: string, msg: AlertMessage): Promise<voi
   }
   if (channel.startsWith("email:")) {
     const to = channel.slice("email:".length);
-    // Primary path: ntfy-native email. Publishing to the existing ntfy topic
+    // Primary path: Brevo transactional email HTTP API. A plain POST — no verified
+    // domain needed, just a validated sender. Preferred whenever BREVO_API_KEY is
+    // set; ntfy-email and Resend below stay as layered fallbacks for when it isn't.
+    const brevoKey = process.env.BREVO_API_KEY?.trim();
+    if (brevoKey) {
+      const from =
+        process.env.ALERT_EMAIL_FROM?.trim() ||
+        process.env.ALERT_EMAIL?.trim() ||
+        "alerts@agentlabs.cc";
+      const { ok, status } = await sendBrevoEmail({ to, subject: msg.subject, body: msg.body, apiKey: brevoKey, from });
+      if (!ok) console.error(`email: Brevo returned ${status} for ${to}`);
+      return;
+    }
+    // Fallback 1: ntfy-native email. Publishing to the existing ntfy topic
     // with an `Email:` header makes ntfy deliver the message as an email — no
     // Resend account, API key, or verified domain required. Reuses NTFY_TOPIC,
     // so email rides the same channel already deployed for phone push.
@@ -294,10 +332,10 @@ export async function notifyOne(channel: string, msg: AlertMessage): Promise<voi
       }
       return;
     }
-    // Fallback: Resend HTTP API (heavier — needs account + API key + verified domain).
+    // Fallback 2: Resend HTTP API (heavier — needs account + API key + verified domain).
     const apiKey = process.env.RESEND_API_KEY;
     if (!apiKey) {
-      console.warn("⚠️  email: no NTFY_TOPIC and no RESEND_API_KEY — falling back to stdout");
+      console.warn("⚠️  email: no BREVO_API_KEY, no NTFY_TOPIC and no RESEND_API_KEY — falling back to stdout");
       console.log(`${msg.subject}\n${msg.body}`);
       return;
     }
