@@ -31,6 +31,7 @@
 import * as YAML from "yaml";
 import { readFileSync, writeFileSync, renameSync, existsSync, mkdirSync } from "fs";
 import { dirname, resolve } from "path";
+import { addJob, removeJob } from "./store.ts";
 
 // ── Config ────────────────────────────────────────────────────────────────────
 
@@ -43,9 +44,6 @@ const home = process.env.HOME ?? "/root";
 const MKT_CONFIG  = process.env.MKT_CONFIG  ?? resolve(home, ".config/mkt/config.yaml");
 const MKT_HISTORY = process.env.MKT_HISTORY ?? resolve(home, ".config/mkt/alert-history.ndjson");
 const META_PATH   = process.env.META_PATH   ?? resolve(home, ".config/mkt-watch/alerts-meta.json");
-
-if (!API_TOKEN)  { console.error("API_TOKEN not set"); process.exit(1); }
-if (!NTFY_TOPIC) { console.error("NTFY_TOPIC not set"); process.exit(1); }
 
 // ── Types ─────────────────────────────────────────────────────────────────────
 
@@ -192,6 +190,33 @@ function conditionsMatch(rule: AlertRule, meta: AlertMeta): boolean {
   });
 }
 
+// ── Checker-store mirror (compatibility boundary) ─────────────────────────────
+//
+// Two delivery engines run side by side:
+//   • the Go mkt daemon — fires every rule in config.yaml and delivers a phone
+//     push to its ONE global ntfy topic (NTFY_TOPIC). It has no per-alert email,
+//     telegram, or per-topic ntfy routing.
+//   • the Bun checker (check.ts) — reads the mirror store (MKT_ALERTS_STORE) and
+//     CAN deliver email / telegram / arbitrary ntfy topics.
+//
+// So an `email:` alert created here must also land in the checker store, or it is
+// never emailed (silent schema mismatch — the whole point of this fix). To avoid
+// double-notifying, the mirror carries ONLY the routes the daemon cannot deliver:
+// email:, telegram:, telegram-bot:, stdout, and ntfy:<topic> for any topic other
+// than the daemon's own global one. The default push (no channels) and an explicit
+// ntfy:<global topic> are left entirely to the daemon. Returns [] when nothing
+// needs mirroring — in which case no checker job is written at all.
+function checkerChannels(channels: string[] | undefined, globalTopic: string): string[] {
+  if (!channels?.length) return [];
+  return channels
+    .map(ch => ch.trim())
+    .filter(ch => {
+      if (!ch) return false;
+      if (globalTopic && ch === `ntfy:${globalTopic}`) return false; // daemon already pushes this
+      return true;
+    });
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 
 function authorized(req: Request): boolean {
@@ -289,17 +314,20 @@ async function handleGetAlerts(): Promise<Response> {
   return json(enriched);
 }
 
-async function handlePostAlert(req: Request): Promise<Response> {
-  let body: Partial<AlertMeta & { reason: string }>;
+export async function handlePostAlert(req: Request): Promise<Response> {
+  let body: Partial<AlertMeta & { reason: string; reasoning: string; cooldownSec: number; expiry: string }>;
   try { body = await req.json(); }
   catch { return json({ error: "invalid JSON" }, 400); }
 
-  const { symbol, conditions, match, reason, analysisLink, desk, channels } = body as
-    Partial<AlertMeta & { reason: string }>;
+  const { symbol, conditions, match, analysisLink, desk, channels, cooldownSec, expiry } = body;
+  // The public CLI sends `reasoning`; the API/meta field is `reason`. Accept
+  // either through one path so the two never silently mismatch (a POST with only
+  // `reasoning` used to 400 on "reason required").
+  const reason = (body.reason ?? body.reasoning)?.trim();
 
   if (!symbol?.trim())          return json({ error: "symbol required" }, 400);
   if (!conditions?.length)      return json({ error: "conditions required (non-empty array)" }, 400);
-  if (!reason?.trim())          return json({ error: "reason required" }, 400);
+  if (!reason)                  return json({ error: "reason required" }, 400);
 
   for (const c of conditions) {
     if (!(VALID_CONDITIONS as readonly string[]).includes(c.condition as typeof VALID_CONDITIONS[number]))
@@ -335,6 +363,10 @@ async function handlePostAlert(req: Request): Promise<Response> {
     ...(match ? { match } : {}),
   };
 
+  // Routes the Go daemon cannot deliver (email etc.) must be mirrored into the
+  // checker store, keyed by the SAME id as the meta entry so DELETE removes both.
+  const mirrorChannels = checkerChannels(channels, NTFY_TOPIC);
+
   await withLock(async () => {
     const meta = loadMeta();
     meta.push(newMeta);
@@ -344,13 +376,37 @@ async function handlePostAlert(req: Request): Promise<Response> {
     const cfg = loadMktConfig();
     cfg.alerts = [...(cfg.alerts ?? []), newRule];
     saveMktConfig(cfg);
+
+    if (mirrorChannels.length) {
+      try {
+        addJob(
+          {
+            desk: desk ?? "crypto",
+            symbol,
+            conditions,
+            reasoning: reason,
+            channels: mirrorChannels,
+            ...(match         ? { match: match as "all" | "any" | "sequence" } : {}),
+            ...(analysisLink  ? { analysisLink }                  : {}),
+            ...(typeof cooldownSec === "number" ? { cooldownSec } : {}),
+            ...(expiry        ? { expiry }                        : {}),
+          },
+          { id: newMeta.id },
+        );
+        console.log(`[alerts] mirrored ${newMeta.id} into checker store for ${mirrorChannels.join(",")}`);
+      } catch (e) {
+        console.error(`[alerts] checker-store mirror failed for ${newMeta.id}:`, e);
+      }
+    }
   });
 
   await restartMkt();
-  return json(newMeta, 201);
+  // Include `reasoning` (mirrors `reason`) so the CLI, which reads `job.reasoning`,
+  // displays the thesis it just set.
+  return json({ ...newMeta, reasoning: reason }, 201);
 }
 
-async function handleDeleteAlert(id: string): Promise<Response> {
+export async function handleDeleteAlert(id: string): Promise<Response> {
   let removed = false;
 
   await withLock(async () => {
@@ -366,6 +422,10 @@ async function handleDeleteAlert(id: string): Promise<Response> {
     const cfg = loadMktConfig();
     cfg.alerts = (cfg.alerts ?? []).filter(r => !conditionsMatch(r, target));
     saveMktConfig(cfg);
+
+    // Remove the mirrored checker job (same id). Idempotent — a no-op if the
+    // alert had no daemon-undeliverable routes and so was never mirrored.
+    removeJob(id);
     removed = true;
   });
 
@@ -404,53 +464,60 @@ function handleGetNotifications(): Response {
   return json(notifications);
 }
 
+// ── Router ────────────────────────────────────────────────────────────────────
+
+export async function handleRequest(req: Request): Promise<Response> {
+  const url  = new URL(req.url);
+  const path = url.pathname;
+
+  if (!authorized(req)) return unauthorized();
+
+  // GET /subscribe
+  if (req.method === "GET" && path === "/subscribe") {
+    return handleSubscribe();
+  }
+
+  // GET /alerts
+  if (req.method === "GET" && path === "/alerts") {
+    return handleGetAlerts();
+  }
+
+  // POST /alerts
+  if (req.method === "POST" && path === "/alerts") {
+    return handlePostAlert(req);
+  }
+
+  // DELETE /alerts/:id
+  const deleteMatch = path.match(/^\/alerts\/(.+)$/);
+  if (req.method === "DELETE" && deleteMatch) {
+    return handleDeleteAlert(deleteMatch[1]);
+  }
+
+  // GET /notifications
+  if (req.method === "GET" && path === "/notifications") {
+    return handleGetNotifications();
+  }
+
+  // Transparent proxy: /quotes, /metrics, /webhook/tradingview
+  if (
+    path.startsWith("/quotes") ||
+    path.startsWith("/metrics") ||
+    path.startsWith("/webhook/")
+  ) {
+    return proxy(req, `${MKT_ORIGIN}${path}${url.search}`);
+  }
+
+  return json({ error: "not found" }, 404);
+}
+
 // ── Server ────────────────────────────────────────────────────────────────────
+// Only start listening when run directly (`bun api.ts`). Importing this module
+// (tests) gets the handlers without binding a port or exiting on missing env.
 
-Bun.serve({
-  port: PORT,
-  async fetch(req) {
-    const url  = new URL(req.url);
-    const path = url.pathname;
+if (import.meta.main) {
+  if (!API_TOKEN)  { console.error("API_TOKEN not set"); process.exit(1); }
+  if (!NTFY_TOPIC) { console.error("NTFY_TOPIC not set"); process.exit(1); }
 
-    if (!authorized(req)) return unauthorized();
-
-    // GET /subscribe
-    if (req.method === "GET" && path === "/subscribe") {
-      return handleSubscribe();
-    }
-
-    // GET /alerts
-    if (req.method === "GET" && path === "/alerts") {
-      return handleGetAlerts();
-    }
-
-    // POST /alerts
-    if (req.method === "POST" && path === "/alerts") {
-      return handlePostAlert(req);
-    }
-
-    // DELETE /alerts/:id
-    const deleteMatch = path.match(/^\/alerts\/(.+)$/);
-    if (req.method === "DELETE" && deleteMatch) {
-      return handleDeleteAlert(deleteMatch[1]);
-    }
-
-    // GET /notifications
-    if (req.method === "GET" && path === "/notifications") {
-      return handleGetNotifications();
-    }
-
-    // Transparent proxy: /quotes, /metrics, /webhook/tradingview
-    if (
-      path.startsWith("/quotes") ||
-      path.startsWith("/metrics") ||
-      path.startsWith("/webhook/")
-    ) {
-      return proxy(req, `${MKT_ORIGIN}${path}${url.search}`);
-    }
-
-    return json({ error: "not found" }, 404);
-  },
-});
-
-console.log(`mkt-api listening on :${PORT}`);
+  Bun.serve({ port: PORT, fetch: handleRequest });
+  console.log(`mkt-api listening on :${PORT}`);
+}

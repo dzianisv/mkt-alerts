@@ -164,9 +164,12 @@ to Telegram/ntfy). No verified domain required, just a validated sender.
 --channel email:you@example.com
 ```
 
-Email transport is layered — the first one configured wins:
-**Brevo** (`BREVO_API_KEY`) → **ntfy-native email** (`NTFY_TOPIC` + `Email:` header)
-→ **Resend** (`RESEND_API_KEY`) → **stdout** (never silently dropped).
+Email transport is layered and **fails through** — each transport is tried in
+order and, on a non-2xx response or a thrown/network error, the next one runs;
+the first success stops the chain:
+**Brevo** (`BREVO_API_KEY` + `ALERT_EMAIL_FROM`) → **ntfy-native email**
+(`NTFY_TOPIC` + `Email:` header) → **Resend** (`RESEND_API_KEY` + `ALERT_EMAIL_FROM`)
+→ **stdout** (never silently dropped).
 
 **Subject** = symbol + condition (`🔔 BTC-USD: below @ 90000`).
 **Body** = the alert's thesis + current value + trigger + analysis link:
@@ -185,12 +188,13 @@ Analysis: https://notion.so/...
 | Var | Purpose |
 |---|---|
 | `BREVO_API_KEY` | Brevo transactional email API key (primary transport). Store in Bitwarden as `mkt-daemon/brevo-api-key`. ~300 emails/day free. |
-| `ALERT_EMAIL_FROM` | Brevo/Resend sender, e.g. `alerts@agentlabs.cc` — must be a validated Brevo sender. Falls back to `ALERT_EMAIL`. |
-| `RESEND_API_KEY` | *(fallback only)* Resend API key, used when `BREVO_API_KEY` and `NTFY_TOPIC` are both unset. Store in Bitwarden as `mkt-daemon/resend-api-key`. |
+| `ALERT_EMAIL_FROM` | **Required** for Brevo/Resend — the sender ("from"), e.g. `vibeteaichnologies@gmail.com`. Must be a sender verified in the Brevo (or Resend) account. **No default**: if unset, Brevo and Resend are skipped (an unverified "from" is rejected by the ESP). Store in Bitwarden as `mkt-daemon/alert-email-from`. |
+| `ALERT_EMAIL` | Recipient for ntfy-native email delivery. Store in Bitwarden as `mkt-daemon/alert-recipient`. Kept separate from the sender — a recipient is never reused as the "from". |
+| `RESEND_API_KEY` | *(fallback only)* Resend API key, tried after Brevo and ntfy-email. Store in Bitwarden as `mkt-daemon/resend-api-key`. |
 
-With none of `BREVO_API_KEY` / `NTFY_TOPIC` / `RESEND_API_KEY` set, the alert falls back to stdout (never silently dropped).
+With none of `BREVO_API_KEY` / `NTFY_TOPIC` / `RESEND_API_KEY` usable, the alert falls back to stdout (never silently dropped). Brevo and Resend also fall through when `ALERT_EMAIL_FROM` is unset.
 
-`deploy.sh` loads `mkt-daemon/brevo-api-key` and `mkt-daemon/alert-email` from Bitwarden and ships them into `/etc/mkt-daemon.env` alongside the other daemon vars.
+`deploy.sh` loads `mkt-daemon/brevo-api-key`, `mkt-daemon/alert-recipient` (→ `ALERT_EMAIL`) and `mkt-daemon/alert-email-from` (→ `ALERT_EMAIL_FROM`) from Bitwarden and ships them into `/etc/mkt-daemon.env` alongside the other daemon vars.
 
 **Multiple channels** on one alert — repeat `--channel` (delivers to all):
 ```bash

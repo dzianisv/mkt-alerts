@@ -32,7 +32,11 @@ export type AlertJob = {
   match?: "all" | "any" | "sequence";
   conditions: Cond[];
   reasoning: string;
-  channel: string;
+  // Delivery routes. Legacy jobs carry a single comma-joined `channel` string;
+  // API-mirrored jobs carry a `channels[]` array. Read both via resolveChannelSpec
+  // so the checker never silently mismatches on shape.
+  channel?: string;
+  channels?: string[];
   created: string;
   expiry?: string;
   cooldownSec?: number;
@@ -40,6 +44,22 @@ export type AlertJob = {
   fired?: boolean;
   analysisLink?: string;
 };
+
+/**
+ * Canonical delivery spec for a job. Accepts the legacy singular `channel`
+ * (possibly comma-joined) and the newer `channels[]` array through one code
+ * path, returning the comma-joined form `notify()` in check.ts consumes. A
+ * single helper here is the guard against the API and checker drifting apart on
+ * channel shape.
+ */
+export function resolveChannelSpec(job: { channel?: string; channels?: string[] }): string {
+  const list = job.channels?.length
+    ? job.channels
+    : job.channel
+      ? job.channel.split(",")
+      : [];
+  return list.map(s => s.trim()).filter(Boolean).join(",");
+}
 
 export function loadJobs(): AlertJob[] {
   if (!existsSync(STORE_PATH)) return [];
@@ -71,7 +91,10 @@ export const VALID_CONDITIONS = [
   "volume_above", "stddev_above",
 ] as const;
 
-export function addJob(partial: Omit<AlertJob, "id" | "created">): AlertJob {
+export function addJob(
+  partial: Omit<AlertJob, "id" | "created">,
+  opts: { id?: string } = {},
+): AlertJob {
   if (!partial.reasoning?.trim()) throw new Error("reasoning is required and must be non-empty");
   if (!partial.conditions?.length) throw new Error("at least one condition required");
   for (const c of partial.conditions) {
@@ -83,17 +106,23 @@ export function addJob(partial: Omit<AlertJob, "id" | "created">): AlertJob {
   }
 
   const { conditions, symbol } = partial;
+  // A caller-supplied id (used when mirroring an API alert so the checker job and
+  // the alerts-meta entry share one id and DELETE can remove both) wins; else
+  // derive a readable slug id.
   const idBase = slug(`${symbol}-${conditions.map(c => c.condition).join("-")}-${conditions[0].value}`);
   const job: AlertJob = {
-    id: `${idBase}-${randChars(4)}`,
+    id: opts.id?.trim() || `${idBase}-${randChars(4)}`,
     created: new Date().toISOString(),
     ...partial,
     symbol: symbol.toUpperCase(),
   };
 
   const jobs = loadJobs();
-  jobs.push(job);
-  saveJobs(jobs);
+  // Idempotent on id — replace any existing job with the same id rather than
+  // appending a duplicate (protects re-creates / retried API writes).
+  const filtered = jobs.filter(j => j.id !== job.id);
+  filtered.push(job);
+  saveJobs(filtered);
   return job;
 }
 

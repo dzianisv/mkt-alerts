@@ -23,8 +23,12 @@ email through Brevo's transactional HTTP API.
 Trade-off: the free tier appends a **"Sent with Brevo"** footer to every email.
 Acceptable for internal alerts.
 
-Channel precedence in `check.ts` for an `email:` channel:
-**Brevo (if `BREVO_API_KEY` set) → ntfy-native email → Resend** (both fallbacks).
+Channel precedence in `check.ts` for an `email:` channel — layered and
+**fails through** on any non-2xx response OR thrown/network error, first success
+stops the chain:
+**Brevo (`BREVO_API_KEY` + `ALERT_EMAIL_FROM`) → ntfy-native email → Resend
+(`RESEND_API_KEY` + `ALERT_EMAIL_FROM`) → stdout** (final guarantee — never
+silently dropped). Orchestrated by `deliverEmail()` in `scripts/check.ts`.
 
 ## The API
 
@@ -44,19 +48,24 @@ Body:
   }
 ```
 
-Returns `{ ok, status }`. A non-2xx status is logged as
-`email: Brevo returned <status> for <to>` and does not throw.
+Returns `{ ok, status }`. `sendBrevoEmail()` itself does not throw; the
+`deliverEmail()` wrapper treats a non-2xx status **or** a thrown/network error as
+failure and falls through to the next transport (ntfy-email → Resend → stdout).
 
 ## Environment variables
 
 | Env var           | Meaning                          | Bitwarden item (`dev` collection) |
 |-------------------|----------------------------------|-----------------------------------|
 | `BREVO_API_KEY`   | Brevo transactional API key      | `mkt-daemon/brevo-api-key`        |
-| `ALERT_EMAIL_FROM`| Verified sender ("from") address | `mkt-daemon/alert-email`          |
+| `ALERT_EMAIL_FROM`| Verified sender ("from") address | `mkt-daemon/alert-email-from`     |
+| `ALERT_EMAIL`     | Recipient for ntfy-native email  | `mkt-daemon/alert-recipient`      |
 
 Notes:
-- The "from" address resolves in order: `ALERT_EMAIL_FROM` →
-  `ALERT_EMAIL` → `alerts@agentlabs.cc` (last-resort default).
+- `ALERT_EMAIL_FROM` is **required** for Brevo and Resend and has **no default**.
+  It must be a sender verified in the account (see below). When it is unset,
+  Brevo and Resend are skipped entirely — an unverified "from" is rejected by the
+  ESP — and delivery falls through to ntfy-email / stdout. It is never derived
+  from `ALERT_EMAIL` (the recipient) or any hard-coded address.
 - `mkt-daemon/brevo-password` in Bitwarden is the Brevo **account/SMTP login**
   password, kept for dashboard/rotation access; the runtime path uses the API
   key, not the password.
@@ -65,11 +74,15 @@ Notes:
 
 ## How `deploy.sh` wires it up
 
-`deploy.sh` Phase 0 reads the secrets from Bitwarden with `bw get password`,
-writes them into a temp env file, and `scp`s it to the VM as
-`/etc/mkt-daemon.env` (`chmod 600`). The `mkt-check.service` unit loads that
-file via `EnvironmentFile=/etc/mkt-daemon.env`, so `BREVO_API_KEY` and the
-sender address are present in the process environment when `check.ts` runs.
+`deploy.sh` Phase 0 reads the secrets from Bitwarden with `bw get password`
+(`mkt-daemon/brevo-api-key`, `mkt-daemon/alert-recipient` → `ALERT_EMAIL`,
+`mkt-daemon/alert-email-from` → `ALERT_EMAIL_FROM`), writes them into a temp env
+file, and `scp`s it to the VM. It is installed as `/etc/mkt-daemon.env` with
+`install -m 600` (no world-readable window) and the uploaded `/tmp` copy is
+removed immediately (an `EXIT` trap is a backstop). Both `mkt-check.service` and
+`mkt-api.service` load that file via `EnvironmentFile=/etc/mkt-daemon.env`, so
+`BREVO_API_KEY` and the sender/recipient addresses are present in the process
+environment when `check.ts` and `api.ts` run.
 
 The `mkt-check` systemd timer (`OnCalendar=*:0/15`, `Persistent=true`) fires
 `check.ts` every 15 minutes; it reads alert jobs from `MKT_ALERTS_STORE`, pulls
@@ -91,9 +104,10 @@ is set on the daemon.
 ## Verified sender requirement
 
 Brevo will only send from an address that has been **validated as a sender** in
-the Brevo dashboard. `dzianisvv@gmail.com` must be added and verified under
-**Senders, Domains & Dedicated IPs → Senders** before any email will deliver;
-sends from an unverified address are rejected by the API.
+the Brevo dashboard. The project's verified sender is `vibeteaichnologies@gmail.com`;
+it must be added and verified under **Senders, Domains & Dedicated IPs → Senders**
+before any email will deliver, and `ALERT_EMAIL_FROM` must be set to it. Sends
+from an unverified address are rejected by the API.
 
 ## Key rotation
 

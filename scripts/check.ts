@@ -1,5 +1,5 @@
 #!/usr/bin/env bun
-import { loadJobs, markFired, isActive, type AlertJob, type Cond } from "./store.ts";
+import { loadJobs, markFired, isActive, resolveChannelSpec, type AlertJob, type Cond } from "./store.ts";
 import { rsi, macd, sma } from "./indicators.ts";
 
 const MKT_BIN = `${process.env.HOME}/.local/bin/mkt`;
@@ -173,9 +173,11 @@ async function fetchCloses(symbol: string, limit = 60): Promise<number[]> {
 // A fired alert produces one AlertMessage. `text` is the compact single-string
 // form used by push channels (stdout/ntfy/telegram/telegram-bot). Email uses
 // `subject` (symbol + condition) and `body` (reason + current value + trigger)
-// so the thesis survives in an inbox-friendly shape. Email transport is layered:
-// Brevo (primary, BREVO_API_KEY) → ntfy-native email (NTFY_TOPIC) → Resend
-// (RESEND_API_KEY) → stdout.
+// so the thesis survives in an inbox-friendly shape. Email transport is layered
+// with fall-through: Brevo (primary, BREVO_API_KEY) → ntfy-native email
+// (NTFY_TOPIC) → Resend (RESEND_API_KEY) → stdout. A transport that fails
+// (non-ok status or thrown error) falls through to the next; the first success
+// stops the chain. See deliverEmail().
 
 export type AlertMessage = { subject: string; body: string; text: string };
 
@@ -254,6 +256,79 @@ export async function sendEmail(opts: EmailOpts): Promise<{ ok: boolean; status:
   return { ok: res.ok, status: res.status };
 }
 
+/**
+ * Deliver one email with layered fallback: Brevo -> ntfy-native email -> Resend ->
+ * stdout. A transport that returns a non-ok status OR throws (network error)
+ * falls through to the next; the first success stops the chain. stdout is the
+ * final guarantee -- an alert is never silently dropped.
+ *
+ * Sender and recipient are separate. `to` is the recipient (from the channel
+ * spec); the sender is ALERT_EMAIL_FROM and is REQUIRED for Brevo and Resend. It
+ * never defaults to the recipient or to a hard-coded address -- an unverified
+ * "from" is rejected by the ESP, so that transport is skipped rather than sent
+ * from a bad address (ntfy-email carries no sender, so it still runs).
+ */
+export async function deliverEmail(to: string, msg: AlertMessage): Promise<void> {
+  const from = process.env.ALERT_EMAIL_FROM?.trim();
+
+  // 1. Brevo (primary transport).
+  const brevoKey = process.env.BREVO_API_KEY?.trim();
+  if (brevoKey) {
+    if (!from) {
+      console.error("email: BREVO_API_KEY set but ALERT_EMAIL_FROM missing - skipping Brevo (refusing to send from an unverified address)");
+    } else {
+      try {
+        const { ok, status } = await sendBrevoEmail({ to, subject: msg.subject, body: msg.body, apiKey: brevoKey, from });
+        if (ok) return;
+        console.error(`email: Brevo returned ${status} for ${to} - falling back`);
+      } catch (e) {
+        console.error(`email: Brevo threw for ${to} (${e}) - falling back`);
+      }
+    }
+  }
+
+  // 2. ntfy-native email - publish to the topic with an `Email:` header; ntfy
+  //    delivers it as an email. No verified sender needed.
+  const topic = process.env.NTFY_TOPIC?.trim();
+  if (topic) {
+    try {
+      const server = (process.env.NTFY_SERVER?.trim() || "https://ntfy.sh").replace(/\/+$/, "");
+      // HTTP headers must be latin-1: strip non-ASCII (emoji) from the Title.
+      const asciiSubject = msg.subject.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
+      const headers: Record<string, string> = { "Content-Type": "text/plain", Title: asciiSubject, Email: to };
+      // ntfy.sh blocks ANONYMOUS email sending - the Email header needs a token.
+      const token = process.env.NTFY_TOKEN?.trim();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${server}/${topic}`, { method: "POST", headers, body: msg.body });
+      if (res.ok) return;
+      const detail = await res.text().catch(() => "");
+      console.error(`email(ntfy): ${server}/${topic} -> status ${res.status} for ${to} ${detail}`.trim() + " - falling back");
+    } catch (e) {
+      console.error(`email(ntfy): threw for ${to} (${e}) - falling back`);
+    }
+  }
+
+  // 3. Resend (last-resort transport) - needs API key AND a verified sender.
+  const resendKey = process.env.RESEND_API_KEY?.trim();
+  if (resendKey) {
+    if (!from) {
+      console.error("email: RESEND_API_KEY set but ALERT_EMAIL_FROM missing - skipping Resend");
+    } else {
+      try {
+        const { ok, status } = await sendEmail({ to, subject: msg.subject, body: msg.body, apiKey: resendKey, from });
+        if (ok) return;
+        console.error(`email: Resend returned ${status} for ${to} - falling back`);
+      } catch (e) {
+        console.error(`email: Resend threw for ${to} (${e}) - falling back`);
+      }
+    }
+  }
+
+  // 4. stdout - never silently dropped.
+  console.warn("email: all transports unavailable or failed - falling back to stdout");
+  console.log(`${msg.subject}\n${msg.body}`);
+}
+
 /** Send a fired alert over one channel spec (single prefix:value token). */
 export async function notifyOne(channel: string, msg: AlertMessage): Promise<void> {
   if (channel === "stdout") {
@@ -297,51 +372,7 @@ export async function notifyOne(channel: string, msg: AlertMessage): Promise<voi
   }
   if (channel.startsWith("email:")) {
     const to = channel.slice("email:".length);
-    // Primary path: Brevo transactional email HTTP API. A plain POST — no verified
-    // domain needed, just a validated sender. Preferred whenever BREVO_API_KEY is
-    // set; ntfy-email and Resend below stay as layered fallbacks for when it isn't.
-    const brevoKey = process.env.BREVO_API_KEY?.trim();
-    if (brevoKey) {
-      const from =
-        process.env.ALERT_EMAIL_FROM?.trim() ||
-        process.env.ALERT_EMAIL?.trim() ||
-        "alerts@agentlabs.cc";
-      const { ok, status } = await sendBrevoEmail({ to, subject: msg.subject, body: msg.body, apiKey: brevoKey, from });
-      if (!ok) console.error(`email: Brevo returned ${status} for ${to}`);
-      return;
-    }
-    // Fallback 1: ntfy-native email. Publishing to the existing ntfy topic
-    // with an `Email:` header makes ntfy deliver the message as an email — no
-    // Resend account, API key, or verified domain required. Reuses NTFY_TOPIC,
-    // so email rides the same channel already deployed for phone push.
-    const topic = process.env.NTFY_TOPIC?.trim();
-    if (topic) {
-      const server = (process.env.NTFY_SERVER?.trim() || "https://ntfy.sh").replace(/\/+$/, "");
-      // HTTP headers must be latin-1: strip non-ASCII (emoji) from the Title.
-      const asciiSubject = msg.subject.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
-      const headers: Record<string, string> = { "Content-Type": "text/plain", Title: asciiSubject, Email: to };
-      // ntfy.sh no longer permits ANONYMOUS email sending — publishing with an
-      // Email header requires an access token from a (free) ntfy account. Push
-      // still works anonymously; only the email fan-out needs this token.
-      const token = process.env.NTFY_TOKEN?.trim();
-      if (token) headers.Authorization = `Bearer ${token}`;
-      const res = await fetch(`${server}/${topic}`, { method: "POST", headers, body: msg.body });
-      if (!res.ok) {
-        const detail = await res.text().catch(() => "");
-        console.error(`email(ntfy): ${server}/${topic} → status ${res.status} for ${to} ${detail}`.trim());
-      }
-      return;
-    }
-    // Fallback 2: Resend HTTP API (heavier — needs account + API key + verified domain).
-    const apiKey = process.env.RESEND_API_KEY;
-    if (!apiKey) {
-      console.warn("⚠️  email: no BREVO_API_KEY, no NTFY_TOPIC and no RESEND_API_KEY — falling back to stdout");
-      console.log(`${msg.subject}\n${msg.body}`);
-      return;
-    }
-    const from = process.env.ALERT_EMAIL_FROM ?? process.env.EMAIL_FROM ?? "alerts@resend.dev";
-    const { ok, status } = await sendEmail({ to, subject: msg.subject, body: msg.body, apiKey, from });
-    if (!ok) console.error(`email: Resend returned ${status} for ${to}`);
+    await deliverEmail(to, msg);
     return;
   }
   console.log(`[channel:${channel}] ${msg.text}`);
@@ -419,11 +450,12 @@ async function main() {
 
       console.log(`[${job.id}] FIRED — ${detail}`);
 
+      const channelSpec = resolveChannelSpec(job);
       if (!dryRun) {
-        await notify(job.channel, msg);
+        await notify(channelSpec, msg);
         markFired(job.id, ts);
       } else {
-        console.log(`  [dry-run] would notify ${job.channel}:`);
+        console.log(`  [dry-run] would notify ${channelSpec}:`);
         console.log(`  subject: ${msg.subject}`);
         console.log(`  ${msg.body.replace(/\n/g, "\n  ")}`);
       }

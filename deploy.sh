@@ -79,14 +79,26 @@ else
   ok "ntfy topic loaded from Bitwarden: $NTFY_TOPIC"
 fi
 
-# Alert email recipient — OPTIONAL. When present, ntfy delivers each alert as an
-# email too (native ntfy `Email:` header — no Resend/SMTP account). Add it with:
-#   bw create ... name=mkt-daemon/alert-email  (or set in Bitwarden 'dev' collection)
-ALERT_EMAIL=$(bw get password "mkt-daemon/alert-email" 2>/dev/null || true)
+# Alert email RECIPIENT — OPTIONAL. Who receives fired-alert emails. Stored in
+# Bitwarden as mkt-daemon/alert-recipient (dev collection). Kept separate from the
+# sender below: a recipient address is never reused as the "from".
+ALERT_EMAIL=$(bw get password "mkt-daemon/alert-recipient" 2>/dev/null || true)
 if [[ -n "$ALERT_EMAIL" ]]; then
-  ok "alert email loaded from Bitwarden: $ALERT_EMAIL"
+  ok "alert recipient loaded from Bitwarden"
 else
-  echo "  ⚠ mkt-daemon/alert-email not set — email delivery stays off until you add it"
+  echo "  ⚠ mkt-daemon/alert-recipient not set — email delivery stays off until you add it"
+fi
+
+# Alert email SENDER ("from") — REQUIRED for Brevo/Resend delivery. Must be a
+# sender verified in the Brevo (or Resend) account, e.g. vibeteaichnologies@gmail.com.
+# Stored in Bitwarden as mkt-daemon/alert-email-from. Never defaults to the
+# recipient or a hard-coded address — an unverified "from" is rejected by the ESP,
+# so when this is unset Brevo/Resend are skipped (ntfy-native email still works).
+ALERT_EMAIL_FROM=$(bw get password "mkt-daemon/alert-email-from" 2>/dev/null || true)
+if [[ -n "$ALERT_EMAIL_FROM" ]]; then
+  ok "alert sender (from) loaded from Bitwarden"
+else
+  echo "  ⚠ mkt-daemon/alert-email-from not set — Brevo/Resend email stays off (ntfy-email still works)"
 fi
 
 # ntfy access token — REQUIRED for email delivery. ntfy.sh blocks anonymous email
@@ -169,15 +181,17 @@ fi
 # ── Phase 3: Remote setup ─────────────────────────────────────────────────────
 log "Phase 3: remote setup (Go, Bun, mkt, systemd)"
 
-# Write tmp env file (never committed)
+# Write tmp env file (never committed). Trap guarantees it's shredded from local
+# disk on exit (success or failure) — it carries secrets.
 TMP_ENV=$(mktemp)
+trap 'rm -f "${TMP_ENV:-}"' EXIT
 cat > "$TMP_ENV" <<EOF
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=@CryptoAiInvestor
 NTFY_TOPIC=${NTFY_TOPIC}
 NTFY_TOKEN=${NTFY_TOKEN}
 ALERT_EMAIL=${ALERT_EMAIL}
-ALERT_EMAIL_FROM=${ALERT_EMAIL}
+ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM}
 BREVO_API_KEY=${BREVO_API_KEY}
 API_TOKEN=${API_TOKEN}
 MKT_ORIGIN=http://127.0.0.1:8080
@@ -195,6 +209,9 @@ done
 
 SSH "$(cat << REMOTE
 set -euo pipefail
+# The secret env arrives at /tmp/mkt-daemon.env; guarantee it is removed on exit
+# (success or failure). It is installed to /etc with mode 600 below.
+trap 'rm -f /tmp/mkt-daemon.env' EXIT
 export PATH=\$PATH:/usr/local/go/bin:\$HOME/.local/bin:\$HOME/.bun/bin
 
 # ── apt deps ─────────────────────────────────────────────────────────────────
@@ -235,8 +252,10 @@ if [[ -f /tmp/package.json ]]; then
 fi
 
 # ── env / secrets ─────────────────────────────────────────────────────────────
-sudo cp /tmp/mkt-daemon.env /etc/mkt-daemon.env
-sudo chmod 600 /etc/mkt-daemon.env
+# Install in one atomic step with mode 600 (no world-readable window), then remove
+# the uploaded copy so the secret never lingers in /tmp (the EXIT trap is a backstop).
+sudo install -m 600 /tmp/mkt-daemon.env /etc/mkt-daemon.env
+rm -f /tmp/mkt-daemon.env
 
 # ── systemd: mkt-daemon ───────────────────────────────────────────────────────
 U=\$(whoami)
@@ -277,6 +296,7 @@ User=\$U
 EnvironmentFile=/etc/mkt-daemon.env
 Environment=HOME=/home/\$U
 Environment=PATH=/usr/local/go/bin:/home/\$U/.local/bin:/home/\$U/.bun/bin:/usr/bin:/bin
+Environment=MKT_ALERTS_STORE=/home/\$U/.config/mkt-watch/agent-alerts.json
 WorkingDirectory=/home/\$U/.agents/skills/mkt/scripts
 ExecStart=/home/\$U/.bun/bin/bun api.ts
 Restart=on-failure

@@ -158,7 +158,7 @@ added alert:`);
   const emailChans = channels.filter((c) => c.startsWith("email:"));
   if (emailChans.length)
     console.log(`
-Email delivery needs RESEND_API_KEY + ALERT_EMAIL_FROM set where the checker runs.`);
+Email delivery: Brevo (primary, needs BREVO_API_KEY + ALERT_EMAIL_FROM) \u2192 ntfy-email \u2192 Resend \u2192 stdout, set where the checker runs. ALERT_EMAIL_FROM must be a verified sender; without it Brevo/Resend are skipped.`);
   console.log(`
 Notification \u2192 see bun mkt-alerts.ts subscribe for your ntfy URL`);
 } else {

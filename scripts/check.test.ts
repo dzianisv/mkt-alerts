@@ -3,7 +3,7 @@
 // No real emails/pushes are sent — the transport fetch is mocked.
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, type AlertMessage } from "./check.ts";
+import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, deliverEmail, type AlertMessage } from "./check.ts";
 import type { AlertJob } from "./store.ts";
 
 function job(overrides: Partial<AlertJob> = {}): AlertJob {
@@ -130,6 +130,7 @@ describe("notify — email channel end to end", () => {
     delete process.env.ALERT_EMAIL_FROM;
     delete process.env.NTFY_TOPIC;
     delete process.env.NTFY_SERVER;
+    delete process.env.NTFY_TOKEN;
   });
 
   test("email: sends via Brevo when BREVO_API_KEY set (primary, over ntfy + Resend)", async () => {
@@ -160,20 +161,18 @@ describe("notify — email channel end to end", () => {
     expect(calls.some(c => c.url.includes("api.resend.com"))).toBe(false);
   });
 
-  test("email: Brevo sender falls back to ALERT_EMAIL when ALERT_EMAIL_FROM unset", async () => {
-    const calls: any[] = [];
-    globalThis.fetch = (async (url: any, init: any) => {
-      calls.push({ url: String(url), body: init.body });
-      return new Response("{}", { status: 201 });
-    }) as unknown as typeof fetch;
+  test("email: Brevo is SKIPPED (never sent from the recipient) when ALERT_EMAIL_FROM unset", async () => {
+    let called = false;
+    globalThis.fetch = (async () => { called = true; return new Response("{}", { status: 201 }); }) as unknown as typeof fetch;
     process.env.BREVO_API_KEY = "xkeysib_test_key";
-    process.env.ALERT_EMAIL = "sender@agentlabs.cc";
+    process.env.ALERT_EMAIL = "recipient@agentlabs.cc"; // recipient, NOT a verified sender
+    // No ALERT_EMAIL_FROM, no NTFY_TOPIC, no RESEND_API_KEY → Brevo is skipped
+    // (won't send from an unverified/recipient address) and it falls to stdout.
 
     const msg = buildAlertMessage(job(), 88000, TS);
     await notify("email:you@example.com", msg);
 
-    expect(calls).toHaveLength(1);
-    expect(JSON.parse(calls[0].body).sender).toEqual({ email: "sender@agentlabs.cc" });
+    expect(called).toBe(false);
   });
 
   test("email: publishes to ntfy with an Email header (ntfy-native, no Resend)", async () => {
@@ -241,5 +240,82 @@ describe("notify — email channel end to end", () => {
     const msg = buildAlertMessage(job(), 88000, TS);
     await notify("email:you@example.com", msg);
     expect(called).toBe(false);
+  });
+});
+
+describe("deliverEmail — layered fall-through (mocked transport)", () => {
+  const realFetch = globalThis.fetch;
+  const realLog = console.log;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    console.log = realLog;
+    for (const k of ["BREVO_API_KEY","ALERT_EMAIL_FROM","ALERT_EMAIL","NTFY_TOPIC","NTFY_SERVER","NTFY_TOKEN","RESEND_API_KEY"])
+      delete process.env[k];
+  });
+
+  const msg = () => buildAlertMessage(job(), 88000, TS);
+
+  test("Brevo 201 stops the chain — only Brevo is called", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: any) => { calls.push(String(url)); return new Response("{}", { status: 201 }); }) as unknown as typeof fetch;
+    process.env.BREVO_API_KEY = "k";
+    process.env.ALERT_EMAIL_FROM = "from@vibe.com";
+    process.env.NTFY_TOPIC = "t";          // present but must NOT be touched
+    process.env.RESEND_API_KEY = "re";     // present but must NOT be touched
+
+    await deliverEmail("you@example.com", msg());
+    expect(calls).toEqual(["https://api.brevo.com/v3/smtp/email"]);
+  });
+
+  test("Brevo 400 falls through to ntfy-email, which stops the chain", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url); calls.push(u);
+      if (u.includes("brevo")) return new Response("bad request", { status: 400 });
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    process.env.BREVO_API_KEY = "k";
+    process.env.ALERT_EMAIL_FROM = "from@vibe.com";
+    process.env.NTFY_TOPIC = "mytopic";
+    process.env.RESEND_API_KEY = "re";
+
+    await deliverEmail("you@example.com", msg());
+    expect(calls[0]).toBe("https://api.brevo.com/v3/smtp/email");
+    expect(calls[1]).toBe("https://ntfy.sh/mytopic");
+    expect(calls.some(c => c.includes("resend"))).toBe(false); // ntfy succeeded → stop
+  });
+
+  test("Brevo thrown fetch falls through to ntfy-email", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: any) => {
+      const u = String(url); calls.push(u);
+      if (u.includes("brevo")) throw new Error("network down");
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    process.env.BREVO_API_KEY = "k";
+    process.env.ALERT_EMAIL_FROM = "from@vibe.com";
+    process.env.NTFY_TOPIC = "mytopic";
+
+    await deliverEmail("you@example.com", msg());
+    expect(calls[0]).toBe("https://api.brevo.com/v3/smtp/email");
+    expect(calls[1]).toBe("https://ntfy.sh/mytopic");
+  });
+
+  test("all transports fail → stdout fallback, no throw", async () => {
+    const calls: string[] = [];
+    globalThis.fetch = (async (url: any) => { calls.push(String(url)); return new Response("err", { status: 500 }); }) as unknown as typeof fetch;
+    process.env.BREVO_API_KEY = "k";
+    process.env.ALERT_EMAIL_FROM = "from@vibe.com";
+    process.env.NTFY_TOPIC = "mytopic";
+    process.env.RESEND_API_KEY = "re";
+
+    const logs: string[] = [];
+    console.log = ((...a: any[]) => { logs.push(a.map(String).join(" ")); }) as any;
+    await deliverEmail("you@example.com", msg()); // must resolve without throwing
+
+    expect(calls.some(c => c.includes("brevo"))).toBe(true);
+    expect(calls.some(c => c.includes("ntfy.sh/mytopic"))).toBe(true);
+    expect(calls.some(c => c.includes("resend"))).toBe(true);
+    expect(logs.join("\n")).toContain("Support break"); // alert carried to stdout
   });
 });

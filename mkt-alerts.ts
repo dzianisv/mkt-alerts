@@ -190,7 +190,7 @@ if (sub === "subscribe") {
   if (job.channels?.length) console.log(`  channels:  ${job.channels.join(", ")}`);
   const emailChans = channels.filter(c => c.startsWith("email:"));
   if (emailChans.length)
-    console.log(`\nEmail delivery needs RESEND_API_KEY + ALERT_EMAIL_FROM set where the checker runs.`);
+    console.log(`\nEmail delivery: Brevo (primary, needs BREVO_API_KEY + ALERT_EMAIL_FROM) → ntfy-email → Resend → stdout, set where the checker runs. ALERT_EMAIL_FROM must be a verified sender; without it Brevo/Resend are skipped.`);
   console.log(`\nNotification → see bun mkt-alerts.ts subscribe for your ntfy URL`);
 
 } else {

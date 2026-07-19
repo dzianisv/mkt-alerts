@@ -3,5 +3,6 @@
 !.env.example
 *.key
 *.pem
+.cache/
 scripts/node_modules/
 scripts/bun.lock
