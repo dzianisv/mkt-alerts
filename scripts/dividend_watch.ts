@@ -18,7 +18,11 @@
  *   2. UPCOMING ex-date <= N days    → last window to decide before going ex
  *   3. POST-EX price reaction        → did it drop less than the payout? (accretive)
  *
- * Env: NTFY_TOPIC, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID (any subset; falls back to stdout).
+ * Env: NTFY_TOPIC, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID, ALERT_EMAIL (any subset; falls back to stdout).
+ *      ALERT_EMAIL is the email RECIPIENT. Email delivery is layered with
+ *      fall-through: Brevo (needs BREVO_API_KEY + a verified ALERT_EMAIL_FROM
+ *      sender — never the recipient) → ntfy-native `Email:` header → stdout. When
+ *      Brevo is not usable, email rides the ntfy push (single call). See deliverEmail().
  *      TICKERS (space/comma list, default "SITC"), UPCOMING_DAYS (default 14).
  * State: $STATE_DIR or ~/.local/state/dividend-watch/<TICKER>.json
  */
@@ -31,6 +35,9 @@ const NTFY_TOPIC = process.env.NTFY_TOPIC?.trim();
 const NTFY_SERVER = process.env.NTFY_SERVER?.trim() || "https://ntfy.sh";
 const TG_TOKEN = process.env.TELEGRAM_BOT_TOKEN?.trim();
 const TG_CHAT = process.env.TELEGRAM_CHAT_ID?.trim();
+// When set, ntfy delivers each push ALSO as an email to this address (ntfy-native
+// email — an `Email:` header on publish; no Resend/SMTP needed).
+const ALERT_EMAIL = process.env.ALERT_EMAIL?.trim();
 const STATE_DIR =
   process.env.STATE_DIR || join(homedir(), ".local/state/dividend-watch");
 const UPCOMING_DAYS = Number(process.env.UPCOMING_DAYS || 14);
@@ -64,14 +71,98 @@ async function pushNtfy(title: string, body: string, priority = "default"): Prom
   try {
     // HTTP headers must be latin-1: strip emoji/non-ASCII from Title. Emoji stays in body.
     const asciiTitle = title.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
+    const headers: Record<string, string> = { Title: asciiTitle, Priority: priority, Tags: "moneybag" };
+    // ntfy-native email fan-out is used ONLY when Brevo is not usable (no key or
+    // no verified ALERT_EMAIL_FROM). When Brevo IS usable, deliverEmail() owns the
+    // email and this call stays push-only, so there is no double push/email.
+    const brevoUsable = !!(process.env.BREVO_API_KEY?.trim() && process.env.ALERT_EMAIL_FROM?.trim());
+    if (ALERT_EMAIL && !brevoUsable) headers.Email = ALERT_EMAIL;
+    // ntfy.sh requires an access token for the Email header (anonymous email is
+    // blocked); push itself stays anonymous. Token only needed when emailing.
+    const ntfyToken = process.env.NTFY_TOKEN?.trim();
+    if (ntfyToken) headers.Authorization = `Bearer ${ntfyToken}`;
     await fetch(`${NTFY_SERVER}/${NTFY_TOPIC}`, {
       method: "POST",
-      headers: { Title: asciiTitle, Priority: priority, Tags: "moneybag" },
+      headers,
       body,
     });
   } catch (e) {
     console.error("ntfy push failed:", e);
   }
+}
+
+export type DivEmailEnv = {
+  brevoKey?: string;
+  from?: string;
+  to?: string;
+  ntfyTopic?: string;
+  ntfyServer?: string;
+  ntfyToken?: string;
+};
+
+export function readEmailEnv(): DivEmailEnv {
+  return {
+    brevoKey: process.env.BREVO_API_KEY?.trim(),
+    from: process.env.ALERT_EMAIL_FROM?.trim(),
+    to: process.env.ALERT_EMAIL?.trim(),
+    ntfyTopic: process.env.NTFY_TOPIC?.trim(),
+    ntfyServer: process.env.NTFY_SERVER?.trim() || "https://ntfy.sh",
+    ntfyToken: process.env.NTFY_TOKEN?.trim(),
+  };
+}
+
+/**
+ * Deliver a dividend-watch alert as email with layered fall-through mirroring
+ * check.ts: Brevo (primary) -> ntfy-native email -> stdout. A transport that
+ * returns a non-ok status OR throws falls through; the first success stops.
+ *
+ * Sender and recipient are separate: `to` is ALERT_EMAIL (recipient); the sender
+ * is ALERT_EMAIL_FROM and is REQUIRED for Brevo — it never defaults to the
+ * recipient. When Brevo is not usable (no key or no verified sender) this returns
+ * "none" and pushNtfy() emails via its Email header instead, so email is never
+ * sent twice. Returns which transport delivered (for tests).
+ */
+export async function deliverEmail(
+  subject: string,
+  body: string,
+  env: DivEmailEnv = readEmailEnv(),
+  fetchImpl: typeof fetch = fetch,
+): Promise<"brevo" | "ntfy" | "stdout" | "none"> {
+  const to = env.to;
+  if (!to) return "none";                    // no recipient configured -> email off
+  if (!env.brevoKey || !env.from) return "none"; // Brevo not usable -> pushNtfy handles email
+
+  // 1. Brevo (primary).
+  try {
+    const res = await fetchImpl("https://api.brevo.com/v3/smtp/email", {
+      method: "POST",
+      headers: { "api-key": env.brevoKey, "content-type": "application/json" },
+      body: JSON.stringify({ sender: { email: env.from }, to: [{ email: to }], subject, textContent: body }),
+    });
+    if (res.ok) return "brevo";
+    console.error(`dividend email: Brevo returned ${res.status} - falling back`);
+  } catch (e) {
+    console.error(`dividend email: Brevo threw (${e}) - falling back`);
+  }
+
+  // 2. ntfy-native email (fallback only — Brevo was attempted and failed).
+  if (env.ntfyTopic) {
+    try {
+      const server = (env.ntfyServer || "https://ntfy.sh").replace(/\/+$/, "");
+      const asciiSubject = subject.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
+      const headers: Record<string, string> = { Title: asciiSubject, Email: to, Tags: "moneybag" };
+      if (env.ntfyToken) headers.Authorization = `Bearer ${env.ntfyToken}`;
+      const res = await fetchImpl(`${server}/${env.ntfyTopic}`, { method: "POST", headers, body });
+      if (res.ok) return "ntfy";
+      console.error(`dividend email(ntfy): status ${res.status} - falling back`);
+    } catch (e) {
+      console.error(`dividend email(ntfy): threw (${e}) - falling back`);
+    }
+  }
+
+  // 3. stdout - never silently dropped.
+  console.log(`[dividend email:stdout] ${subject}\n${body}`);
+  return "stdout";
 }
 
 async function pushTelegram(text: string): Promise<void> {
@@ -88,12 +179,18 @@ async function pushTelegram(text: string): Promise<void> {
 }
 
 async function notify(title: string, body: string, priority = "default"): Promise<void> {
-  const anyChannel = NTFY_TOPIC || (TG_TOKEN && TG_CHAT);
+  const emailEnv = readEmailEnv();
+  const brevoUsable = !!(emailEnv.brevoKey && emailEnv.from && emailEnv.to);
+  const anyChannel = NTFY_TOPIC || (TG_TOKEN && TG_CHAT) || brevoUsable;
   if (!anyChannel) {
     console.log(`[notify:stdout] ${title}\n${body}`);
     return;
   }
-  await Promise.all([pushNtfy(title, body, priority), pushTelegram(`${title}\n\n${body}`)]);
+  await Promise.all([
+    pushNtfy(title, body, priority),
+    pushTelegram(`${title}\n\n${body}`),
+    deliverEmail(title, body, emailEnv),
+  ]);
 }
 
 async function loadState(ticker: string): Promise<State> {
@@ -192,4 +289,6 @@ async function main() {
   }
 }
 
-main();
+if (import.meta.main) {
+  main();
+}

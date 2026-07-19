@@ -155,11 +155,51 @@ Support break — exit signal
 **To use a different bot:** create one via [@BotFather](https://t.me/BotFather), add the token to Bitwarden as `mkt-daemon/telegram-bot-token`, redeploy.
 
 ### Email
-Not yet wired. To add: set `RESEND_API_KEY` in Bitwarden as `mkt-daemon/resend-api-key`, then use:
+Delivered via the [Brevo](https://www.brevo.com) transactional email HTTP API — a
+plain `POST https://api.brevo.com/v3/smtp/email` (matching how alerts already POST
+to Telegram/ntfy). No verified domain required, just a validated sender.
+**Free tier: ~300 emails/day; Brevo free appends a "Sent with Brevo" footer.**
+
 ```bash
 --channel email:you@example.com
 ```
-Requires a free [Resend](https://resend.com) account (3,000 emails/month free).
+
+Email transport is layered and **fails through** — each transport is tried in
+order and, on a non-2xx response or a thrown/network error, the next one runs;
+the first success stops the chain:
+**Brevo** (`BREVO_API_KEY` + `ALERT_EMAIL_FROM`) → **ntfy-native email**
+(`NTFY_TOPIC` + `Email:` header) → **Resend** (`RESEND_API_KEY` + `ALERT_EMAIL_FROM`)
+→ **stdout** (never silently dropped).
+
+**Subject** = symbol + condition (`🔔 BTC-USD: below @ 90000`).
+**Body** = the alert's thesis + current value + trigger + analysis link:
+```
+BTC-USD alert fired at 2026-07-18T12:34:56.000Z
+
+Trigger:  below @ 90000
+Current:  88123.45
+
+Why: Support break — invalidates bull thesis
+Analysis: https://notion.so/...
+```
+
+**Required env vars** (set where the `check.ts` checker runs — see `.env.example`):
+
+| Var | Purpose |
+|---|---|
+| `BREVO_API_KEY` | Brevo transactional email API key (primary transport). Store in Bitwarden as `mkt-daemon/brevo-api-key`. ~300 emails/day free. |
+| `ALERT_EMAIL_FROM` | **Required** for Brevo/Resend — the sender ("from"), e.g. `vibeteaichnologies@gmail.com`. Must be a sender verified in the Brevo (or Resend) account. **No default**: if unset, Brevo and Resend are skipped (an unverified "from" is rejected by the ESP). Store in Bitwarden as `mkt-daemon/alert-email-from`. |
+| `ALERT_EMAIL` | Recipient for ntfy-native email delivery. Store in Bitwarden as `mkt-daemon/alert-recipient`. Kept separate from the sender — a recipient is never reused as the "from". |
+| `RESEND_API_KEY` | *(fallback only)* Resend API key, tried after Brevo and ntfy-email. Store in Bitwarden as `mkt-daemon/resend-api-key`. |
+
+With none of `BREVO_API_KEY` / `NTFY_TOPIC` / `RESEND_API_KEY` usable, the alert falls back to stdout (never silently dropped). Brevo and Resend also fall through when `ALERT_EMAIL_FROM` is unset.
+
+`deploy.sh` loads `mkt-daemon/brevo-api-key`, `mkt-daemon/alert-recipient` (→ `ALERT_EMAIL`) and `mkt-daemon/alert-email-from` (→ `ALERT_EMAIL_FROM`) from Bitwarden and ships them into `/etc/mkt-daemon.env` alongside the other daemon vars.
+
+**Multiple channels** on one alert — repeat `--channel` (delivers to all):
+```bash
+--channel email:you@example.com --channel telegram-bot:@CryptoAiInvestor
+```
 
 ### ntfy (no account needed)
 ```bash

@@ -79,6 +79,10 @@ commands:
           [--link <url>]        optional analysis URL in the notification
           [--cooldown <sec>]    re-alert after N seconds (default: one-shot)
           [--desk crypto|stocks]
+          [--channel <spec>]    delivery channel; repeat for several. one of:
+                                  email:you@example.com
+                                  telegram-bot:@CryptoAiInvestor
+                                  ntfy:my-topic   (default: your ntfy topic)
   list                          list active alerts
   remove  --id <id>             remove alert by ID
 
@@ -128,9 +132,22 @@ if (sub === "subscribe") {
   const desk       = flag(args, "desk")      ?? "crypto";
   const link       = flag(args, "link");
   const cooldown   = flag(args, "cooldown");
+  const channels   = flagAll(args, "channel");
 
   if (!conditions.length) die("--condition required");
   if (conditions.length !== values.length) die("each --condition needs a --value");
+
+  // Validate delivery channels. Recipient is carried after the prefix, e.g.
+  //   --channel email:you@example.com
+  //   --channel telegram-bot:@CryptoAiInvestor
+  // Repeat --channel to deliver to several places (email + telegram together).
+  const CHANNEL_PREFIXES = ["email:", "telegram:", "telegram-bot:", "ntfy:", "stdout"];
+  for (const ch of channels) {
+    if (!CHANNEL_PREFIXES.some(p => ch === p || ch.startsWith(p)))
+      die(`invalid --channel "${ch}". Use one of: ${CHANNEL_PREFIXES.join(", ")}<target>`);
+    if (ch.startsWith("email:") && !/^email:[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ch))
+      die(`invalid email recipient in "${ch}". Use --channel email:you@example.com`);
+  }
 
   // Hard gate: price-level conditions require --data-source.
   // Prevents fabricated support/resistance levels from being stored.
@@ -158,8 +175,9 @@ if (sub === "subscribe") {
     reasoning: finalReasoning,
     desk,
     conditions: conditions.map((c, i) => ({ condition: c, value: parseFloat(values[i]) })),
-    ...(link     ? { analysisLink: link }              : {}),
-    ...(cooldown ? { cooldownSec: parseInt(cooldown) } : {}),
+    ...(link            ? { analysisLink: link }              : {}),
+    ...(cooldown        ? { cooldownSec: parseInt(cooldown) } : {}),
+    ...(channels.length ? { channels }                        : {}),
   };
 
   const job = await api(auth, "POST", "/alerts", body) as any;
@@ -169,6 +187,10 @@ if (sub === "subscribe") {
   console.log(`  condition: ${job.conditions.map((c: any) => `${c.condition} @ ${c.value}`).join(", ")}`);
   console.log(`  reason:    ${job.reasoning}`);
   if (job.analysisLink) console.log(`  link:      ${job.analysisLink}`);
+  if (job.channels?.length) console.log(`  channels:  ${job.channels.join(", ")}`);
+  const emailChans = channels.filter(c => c.startsWith("email:"));
+  if (emailChans.length)
+    console.log(`\nEmail delivery: Brevo (primary, needs BREVO_API_KEY + ALERT_EMAIL_FROM) → ntfy-email → Resend → stdout, set where the checker runs. ALERT_EMAIL_FROM must be a verified sender; without it Brevo/Resend are skipped.`);
   console.log(`\nNotification → see bun mkt-alerts.ts subscribe for your ntfy URL`);
 
 } else {

@@ -79,6 +79,52 @@ else
   ok "ntfy topic loaded from Bitwarden: $NTFY_TOPIC"
 fi
 
+# Alert email RECIPIENT — OPTIONAL. Who receives fired-alert emails. Stored in
+# Bitwarden as mkt-daemon/alert-recipient (dev collection). Kept separate from the
+# sender below: a recipient address is never reused as the "from".
+ALERT_EMAIL=$(bw get password "mkt-daemon/alert-recipient" 2>/dev/null || true)
+if [[ -n "$ALERT_EMAIL" ]]; then
+  ok "alert recipient loaded from Bitwarden"
+else
+  echo "  ⚠ mkt-daemon/alert-recipient not set — email delivery stays off until you add it"
+fi
+
+# Alert email SENDER ("from") — REQUIRED for Brevo/Resend delivery. Must be a
+# sender verified in the Brevo (or Resend) account, e.g. vibeteaichnologies@gmail.com.
+# Stored in Bitwarden as mkt-daemon/alert-email-from. Never defaults to the
+# recipient or a hard-coded address — an unverified "from" is rejected by the ESP,
+# so when this is unset Brevo/Resend are skipped (ntfy-native email still works).
+ALERT_EMAIL_FROM=$(bw get password "mkt-daemon/alert-email-from" 2>/dev/null || true)
+if [[ -n "$ALERT_EMAIL_FROM" ]]; then
+  ok "alert sender (from) loaded from Bitwarden"
+else
+  echo "  ⚠ mkt-daemon/alert-email-from not set — Brevo/Resend email stays off (ntfy-email still works)"
+fi
+
+# ntfy access token — REQUIRED for email delivery. ntfy.sh blocks anonymous email
+# sending; the Email header needs a token from a (free) ntfy account. Push works
+# without it. Create: register at ntfy.sh → Account → Access tokens → store as
+# Bitwarden item 'mkt-daemon/ntfy-token'.
+NTFY_TOKEN=$(bw get password "mkt-daemon/ntfy-token" 2>/dev/null || true)
+if [[ -n "$NTFY_TOKEN" ]]; then
+  ok "ntfy token loaded from Bitwarden (email delivery enabled)"
+else
+  echo "  ⚠ mkt-daemon/ntfy-token not set — ntfy blocks anonymous email; email stays off (push still works)"
+fi
+
+# Brevo transactional email API key — PRIMARY email transport. When set, the
+# email:<addr> channel (check.ts) and dividend-watch send via Brevo's HTTP API
+# (POST https://api.brevo.com/v3/smtp/email) instead of ntfy-email/Resend. Free
+# tier ~300 emails/day (adds a "Sent with Brevo" footer). Sender = ALERT_EMAIL_FROM,
+# falling back to ALERT_EMAIL. Store as Bitwarden item 'mkt-daemon/brevo-api-key'.
+# Unset → email falls back to ntfy-native email, then Resend.
+BREVO_API_KEY=$(bw get password "mkt-daemon/brevo-api-key" 2>/dev/null || true)
+if [[ -n "$BREVO_API_KEY" ]]; then
+  ok "Brevo API key loaded from Bitwarden (email delivery via Brevo)"
+else
+  echo "  ⚠ mkt-daemon/brevo-api-key not set — email falls back to ntfy-email/Resend"
+fi
+
 # API token — generate once, stored ONLY in ~/.config/mkt-watch/auth.json (user secret, not BW)
 AUTH_JSON="$HOME/.config/mkt-watch/auth.json"
 if [[ -f "$AUTH_JSON" ]]; then
@@ -135,12 +181,18 @@ fi
 # ── Phase 3: Remote setup ─────────────────────────────────────────────────────
 log "Phase 3: remote setup (Go, Bun, mkt, systemd)"
 
-# Write tmp env file (never committed)
+# Write tmp env file (never committed). Trap guarantees it's shredded from local
+# disk on exit (success or failure) — it carries secrets.
 TMP_ENV=$(mktemp)
+trap 'rm -f "${TMP_ENV:-}"' EXIT
 cat > "$TMP_ENV" <<EOF
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=@CryptoAiInvestor
 NTFY_TOPIC=${NTFY_TOPIC}
+NTFY_TOKEN=${NTFY_TOKEN}
+ALERT_EMAIL=${ALERT_EMAIL}
+ALERT_EMAIL_FROM=${ALERT_EMAIL_FROM}
+BREVO_API_KEY=${BREVO_API_KEY}
 API_TOKEN=${API_TOKEN}
 MKT_ORIGIN=http://127.0.0.1:8080
 PORT=9000
@@ -151,12 +203,15 @@ rm -f "$TMP_ENV"
 
 # Upload api server + package.json (yaml dep)
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-for f in api.ts dividend_watch.ts package.json; do
+for f in api.ts dividend_watch.ts check.ts store.ts indicators.ts package.json; do
   [[ -f "$SCRIPT_DIR/scripts/$f" ]] && SCP "$SCRIPT_DIR/scripts/$f" "/tmp/$f"
 done
 
 SSH "$(cat << REMOTE
 set -euo pipefail
+# The secret env arrives at /tmp/mkt-daemon.env; guarantee it is removed on exit
+# (success or failure). It is installed to /etc with mode 600 below.
+trap 'rm -f /tmp/mkt-daemon.env' EXIT
 export PATH=\$PATH:/usr/local/go/bin:\$HOME/.local/bin:\$HOME/.bun/bin
 
 # ── apt deps ─────────────────────────────────────────────────────────────────
@@ -188,16 +243,19 @@ echo "  bun: \$(bun --version)"
 # ── skill scripts + api server ────────────────────────────────────────────────
 MKT_SCRIPTS=\$HOME/.agents/skills/mkt/scripts
 mkdir -p "\$MKT_SCRIPTS"
-[[ -f /tmp/api.ts ]] && cp /tmp/api.ts "\$MKT_SCRIPTS/"
-[[ -f /tmp/dividend_watch.ts ]] && cp /tmp/dividend_watch.ts "\$MKT_SCRIPTS/"
+for f in api.ts dividend_watch.ts check.ts store.ts indicators.ts; do
+  [[ -f /tmp/\$f ]] && cp /tmp/\$f "\$MKT_SCRIPTS/"
+done
 if [[ -f /tmp/package.json ]]; then
   cp /tmp/package.json "\$MKT_SCRIPTS/"
   cd "\$MKT_SCRIPTS" && bun install --quiet
 fi
 
 # ── env / secrets ─────────────────────────────────────────────────────────────
-sudo cp /tmp/mkt-daemon.env /etc/mkt-daemon.env
-sudo chmod 600 /etc/mkt-daemon.env
+# Install in one atomic step with mode 600 (no world-readable window), then remove
+# the uploaded copy so the secret never lingers in /tmp (the EXIT trap is a backstop).
+sudo install -m 600 /tmp/mkt-daemon.env /etc/mkt-daemon.env
+rm -f /tmp/mkt-daemon.env
 
 # ── systemd: mkt-daemon ───────────────────────────────────────────────────────
 U=\$(whoami)
@@ -238,6 +296,7 @@ User=\$U
 EnvironmentFile=/etc/mkt-daemon.env
 Environment=HOME=/home/\$U
 Environment=PATH=/usr/local/go/bin:/home/\$U/.local/bin:/home/\$U/.bun/bin:/usr/bin:/bin
+Environment=MKT_ALERTS_STORE=/home/\$U/.config/mkt-watch/agent-alerts.json
 WorkingDirectory=/home/\$U/.agents/skills/mkt/scripts
 ExecStart=/home/\$U/.bun/bin/bun api.ts
 Restart=on-failure
@@ -289,6 +348,47 @@ TMR
 sudo systemctl daemon-reload
 sudo systemctl enable --now dividend-watch.timer
 echo "  ✓ dividend-watch.timer enabled ($(systemctl is-enabled dividend-watch.timer 2>/dev/null))"
+
+# ── systemd: mkt-check (general price/indicator alert checker via timer) ──────
+# check.ts is the condition engine the mkt Go daemon isn't wired for here: it
+# reads alert jobs from MKT_ALERTS_STORE, pulls live prices via 'mkt mcp', and
+# notifies over each job's channel. The 'email:<addr>' channel publishes to the
+# same ntfy topic with an 'Email:' header, so ntfy sends the alert as an email —
+# no Resend/SMTP account. Runs every 15 min; no-ops when the store has no jobs.
+MKT_STORE=\$HOME/.config/mkt-watch/agent-alerts.json
+mkdir -p "\$(dirname \$MKT_STORE)"
+sudo tee /etc/systemd/system/mkt-check.service > /dev/null << SVC
+[Unit]
+Description=mkt price/indicator alert checker
+After=network-online.target mkt-daemon.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=\$U
+EnvironmentFile=/etc/mkt-daemon.env
+Environment=HOME=/home/\$U
+Environment=PATH=/home/\$U/.local/bin:/home/\$U/.bun/bin:/usr/bin:/bin
+Environment=MKT_ALERTS_STORE=/home/\$U/.config/mkt-watch/agent-alerts.json
+WorkingDirectory=/home/\$U/.agents/skills/mkt/scripts
+ExecStart=/home/\$U/.bun/bin/bun check.ts
+SVC
+
+sudo tee /etc/systemd/system/mkt-check.timer > /dev/null << TMR
+[Unit]
+Description=run mkt-check every 15 minutes
+
+[Timer]
+OnCalendar=*:0/15
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+TMR
+
+sudo systemctl daemon-reload
+sudo systemctl enable --now mkt-check.timer
+echo "  ✓ mkt-check.timer enabled (\$(systemctl is-enabled mkt-check.timer 2>/dev/null))"
 
 # ── cloudflared ───────────────────────────────────────────────────────────────
 if ! command -v cloudflared &>/dev/null; then
