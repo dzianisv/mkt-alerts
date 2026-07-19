@@ -89,6 +89,17 @@ else
   echo "  ⚠ mkt-daemon/alert-email not set — email delivery stays off until you add it"
 fi
 
+# ntfy access token — REQUIRED for email delivery. ntfy.sh blocks anonymous email
+# sending; the Email header needs a token from a (free) ntfy account. Push works
+# without it. Create: register at ntfy.sh → Account → Access tokens → store as
+# Bitwarden item 'mkt-daemon/ntfy-token'.
+NTFY_TOKEN=$(bw get password "mkt-daemon/ntfy-token" 2>/dev/null || true)
+if [[ -n "$NTFY_TOKEN" ]]; then
+  ok "ntfy token loaded from Bitwarden (email delivery enabled)"
+else
+  echo "  ⚠ mkt-daemon/ntfy-token not set — ntfy blocks anonymous email; email stays off (push still works)"
+fi
+
 # API token — generate once, stored ONLY in ~/.config/mkt-watch/auth.json (user secret, not BW)
 AUTH_JSON="$HOME/.config/mkt-watch/auth.json"
 if [[ -f "$AUTH_JSON" ]]; then
@@ -151,6 +162,7 @@ cat > "$TMP_ENV" <<EOF
 TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 TELEGRAM_CHAT_ID=@CryptoAiInvestor
 NTFY_TOPIC=${NTFY_TOPIC}
+NTFY_TOKEN=${NTFY_TOKEN}
 ALERT_EMAIL=${ALERT_EMAIL}
 API_TOKEN=${API_TOKEN}
 MKT_ORIGIN=http://127.0.0.1:8080

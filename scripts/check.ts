@@ -281,12 +281,17 @@ export async function notifyOne(channel: string, msg: AlertMessage): Promise<voi
       const server = (process.env.NTFY_SERVER?.trim() || "https://ntfy.sh").replace(/\/+$/, "");
       // HTTP headers must be latin-1: strip non-ASCII (emoji) from the Title.
       const asciiSubject = msg.subject.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
-      const res = await fetch(`${server}/${topic}`, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain", Title: asciiSubject, Email: to },
-        body: msg.body,
-      });
-      if (!res.ok) console.error(`email(ntfy): ${server}/${topic} → status ${res.status} for ${to}`);
+      const headers: Record<string, string> = { "Content-Type": "text/plain", Title: asciiSubject, Email: to };
+      // ntfy.sh no longer permits ANONYMOUS email sending — publishing with an
+      // Email header requires an access token from a (free) ntfy account. Push
+      // still works anonymously; only the email fan-out needs this token.
+      const token = process.env.NTFY_TOKEN?.trim();
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const res = await fetch(`${server}/${topic}`, { method: "POST", headers, body: msg.body });
+      if (!res.ok) {
+        const detail = await res.text().catch(() => "");
+        console.error(`email(ntfy): ${server}/${topic} → status ${res.status} for ${to} ${detail}`.trim());
+      }
       return;
     }
     // Fallback: Resend HTTP API (heavier — needs account + API key + verified domain).

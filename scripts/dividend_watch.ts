@@ -70,6 +70,10 @@ async function pushNtfy(title: string, body: string, priority = "default"): Prom
     const asciiTitle = title.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
     const headers: Record<string, string> = { Title: asciiTitle, Priority: priority, Tags: "moneybag" };
     if (ALERT_EMAIL) headers.Email = ALERT_EMAIL; // ntfy-native email fan-out
+    // ntfy.sh requires an access token for the Email header (anonymous email is
+    // blocked); push itself stays anonymous. Token only needed when emailing.
+    const ntfyToken = process.env.NTFY_TOKEN?.trim();
+    if (ntfyToken) headers.Authorization = `Bearer ${ntfyToken}`;
     await fetch(`${NTFY_SERVER}/${NTFY_TOPIC}`, {
       method: "POST",
       headers,
