@@ -1,5 +1,5 @@
 ---
-description: Set, list, and remove price/indicator alerts on the self-hosted mkt daemon via the mkt-alerts CLI. Use when analysis concludes with a specific, deterministic entry/exit level worth monitoring (e.g. "alert me if BTC closes below 90000", "RSI oversold on AAPL"), or when turning a Watchlist trigger row into a live alert. Handles auth (bearer token from ~/.config/mkt-watch/auth.json), multi-channel delivery (ntfy push, email, Telegram), and the mandatory data-source evidence gate for price levels. Not for one-off "sell now" decisions (those have no monitorable condition) or calendar reminders — the daemon only evaluates price/indicator conditions.
+description: Set, list, and remove price/indicator alerts on the self-hosted mkt daemon via the mkt-alerts CLI. Use when analysis concludes with a specific, deterministic entry/exit level worth monitoring (e.g. "alert me if BTC closes below 90000", "RSI oversold on AAPL"), or when turning a Watchlist trigger row into a live alert. Also supports Pine Script v5 alerts (run off-TradingView via an isolated PineTS sidecar) for any custom indicator/period the fixed built-in conditions can't express. Handles auth (bearer token from ~/.config/mkt-watch/auth.json), multi-channel delivery (ntfy push, email, Telegram), and the mandatory data-source evidence gate for price levels. Not for one-off "sell now" decisions (those have no monitorable condition) or calendar reminders — the daemon only evaluates price/indicator conditions.
 ---
 
 # mkt-alerts
@@ -70,11 +70,78 @@ npx -y @vibetechnologies/mkt-alerts remove --id <id>
 | `sma_cross_above` / `sma_cross_below` | price crosses SMA(20) | `0` |
 | `macd_cross` | MACD histogram flips sign | `0` |
 
-**CLI period limitation:** indicator periods are **not settable via the CLI** — `rsi_*` is fixed at 14 and `sma_cross_*` at 20. You cannot express `sma_cross_below(200)` or `rsi_below(21)` through the CLI. For a 200-day trend break, use a **price** condition at the computed 200DMA value instead:
+**CLI period limitation:** indicator periods are **not settable via the built-in conditions** — `rsi_*` is fixed at 14 and `sma_cross_*` at 20. You cannot express `sma_cross_below(200)` or `rsi_below(21)` through the built-in conditions. Two escape hatches:
+- For a single-level trend break, use a **price** condition at the computed value:
 ```bash
 --condition below --value 274.22 --data-source "AAPL 200DMA 274.22, yfinance 1d, pulled 2026-07-20"
 ```
+- For any custom indicator/period/logic, use a **Pine Script alert** (`--pine`, see the next section) — you write the exact `ta.sma(close, 200)` / `ta.rsi(close, 21)` yourself.
+
 (`volume_above` / `stddev_above` are accepted by the CLI but evaluate to no-fire in the current checker — don't rely on them.)
+
+## Pine Script alerts (`--pine`) — custom indicators, off TradingView
+
+Run **real Pine Script v5** against live OHLCV without a TradingView account. The checker evaluates your script every 15 min through an **isolated `pine-runner` sidecar** (LuxAlgo PineTS, AGPL-3.0, run as a subprocess — never bundled into the MIT CLI) and fires through the normal delivery pipeline. This removes the period limitation above: you write whatever indicator and period you want.
+
+**Prerequisite (self-host):** the *checker VM* must have `pine-runner` installed. `deploy.sh` does this automatically (`bun install` under `~/.agents/skills/mkt/pine-runner`). The `add --pine` command itself works from any CLI — it just ships the script text to the API; execution happens on the deployed checker. Against `https://mkt.agentlabs.cc` it's already installed. Confirm on your own daemon with `journalctl -u mkt-check` — a pine evaluation logs `pine signal last=… prev=…`.
+
+### The script contract
+
+Your script must **`plot(<series>, "signal")`** — one numeric series the checker reads per bar. Encode your condition so **positive = fire**:
+
+| `--fire-on` | fires when | use for |
+|---|---|---|
+| `cross_up` (default) | signal crosses 0 upward (`prev ≤ 0` → `last > 0`) | **edge** events — a cross, a break. Fires once at the moment it happens. |
+| `truthy` | signal is currently `> 0` (`last > 0`) | **state** — "while oversold". Fires on any check where it's true. |
+
+Name the plot something else with `--signal <plot>` (default `"signal"`).
+
+### Command
+
+```bash
+# --pine replaces --condition/--value. --data-source is NOT required (the script is the evidence).
+npx -y @vibetechnologies/mkt-alerts add \
+  --symbol BTC-USD \
+  --pine golden-cross.pine \
+  --signal signal \
+  --fire-on cross_up \
+  --reason "WHY SET: SMA20 crossing above SMA50 confirms trend flip; add" \
+  --channel email:you@example.com
+```
+
+### Example scripts
+
+Golden cross (SMA20 over SMA50) — fires once on the cross with `--fire-on cross_up`:
+```pine
+//@version=5
+indicator("golden cross")
+fast = ta.sma(close, 20)
+slow = ta.sma(close, 50)
+plot(fast - slow, "signal")   // >0 when fast is above slow
+```
+
+RSI(21) oversold — custom period the built-ins can't do. `--fire-on cross_up` fires as it dips in; `truthy` fires while it stays oversold:
+```pine
+//@version=5
+indicator("rsi21 oversold")
+r = ta.rsi(close, 21)
+plot(30 - r, "signal")        // >0 when RSI < 30
+```
+
+200DMA break to the downside — `--fire-on cross_up`:
+```pine
+//@version=5
+indicator("200dma break")
+ma = ta.sma(close, 200)
+plot(ma - close, "signal")    // >0 when price is BELOW the 200DMA
+```
+
+### Notes
+
+- **Checker-only + always delivered.** Pine alerts never project to the Go daemon; they're evaluated by `check.ts` and always mirrored to a channel (falls back to your ntfy topic if you pass none).
+- **One-shot by default** — add `--cooldown <sec>` to keep re-firing.
+- **Authoring/testing a script offline:** clone the repo and pipe candles through the sidecar — `echo '{"script":"…","candles":[…],"signalPlot":"signal"}' | bun run pine-runner/run.ts` returns `{ok,last,prev,truthy,crossedUp,…}`. Pure function of (script, candles): no network, no fs, no mkt.
+- **Licensing:** PineTS is AGPL-3.0; the published `@vibetechnologies/mkt-alerts` CLI is MIT and does **not** bundle it. Pine execution only happens on a self-hosted checker that installed `pine-runner` separately.
 
 ## Delivery channels (`--channel`)
 
@@ -126,7 +193,7 @@ npx -y @vibetechnologies/mkt-alerts add \
 ## Limitations to know
 
 - No `--expiry` and no `--match any` via the CLI — compound conditions are always ALL/`and`, and alerts don't auto-expire (remove them manually).
-- Indicator periods fixed (RSI 14, SMA 20) — see the period limitation above.
+- Built-in indicator periods fixed (RSI 14, SMA 20) — for any other period/indicator use a **Pine Script alert** (`--pine`) or a computed price level.
 - One-shot by default: after firing once the alert stops. Use `--cooldown <sec>` for a repeating alert.
 
 ## Before finishing (self-check)
