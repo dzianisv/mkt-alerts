@@ -3,7 +3,7 @@
 // No real emails/pushes are sent — the transport fetch is mocked.
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, deliverEmail, type AlertMessage } from "./check.ts";
+import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, notifyOne, asciiHeader, deliverEmail, type AlertMessage } from "./check.ts";
 import type { AlertJob } from "./store.ts";
 
 function job(overrides: Partial<AlertJob> = {}): AlertJob {
@@ -317,5 +317,64 @@ describe("deliverEmail — layered fall-through (mocked transport)", () => {
     expect(calls.some(c => c.includes("ntfy.sh/mytopic"))).toBe(true);
     expect(calls.some(c => c.includes("resend"))).toBe(true);
     expect(logs.join("\n")).toContain("Support break"); // alert carried to stdout
+  });
+});
+
+describe("notifyOne — ntfy push (Title header emoji regression)", () => {
+  const realFetch = globalThis.fetch;
+  afterEach(() => {
+    globalThis.fetch = realFetch;
+    delete process.env.NTFY_SERVER;
+    delete process.env.NTFY_TOKEN;
+  });
+
+  test("asciiHeader strips the emoji/unicode the Title header cannot carry", () => {
+    expect(asciiHeader("🔔 AAPL: above @ 1")).toBe("AAPL: above @ 1");
+  });
+
+  test("the raw subject would break a real Headers value (documents the bug)", () => {
+    // buildAlertMessage prefixes the subject with 🔔; a non-latin-1 header value
+    // throws when the transport builds the request. This is what took ntfy down.
+    expect(() => new Headers({ Title: "🔔 AAPL: above @ 1" })).toThrow();
+  });
+
+  test("ntfy: sends an ASCII-safe Title so a real request can be built", async () => {
+    let captured: any = null;
+    globalThis.fetch = (async (url: any, init: any) => {
+      captured = { url: String(url), headers: init.headers, body: init.body };
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+
+    const msg = buildAlertMessage(job({ symbol: "AAPL", conditions: [{ condition: "above", value: 1 }] }), 325.82, TS);
+    // Must NOT throw (the old code passed the raw emoji subject as Title).
+    await notifyOne("ntfy:mkt-dz-wl-eb53ce91", msg);
+
+    expect(captured.url).toBe("https://ntfy.sh/mkt-dz-wl-eb53ce91");
+    // Title is printable ASCII only, and a real Headers accepts it.
+    expect(captured.headers.Title).toMatch(/^[\x20-\x7E]*$/);
+    expect(() => new Headers(captured.headers)).not.toThrow();
+    expect(captured.body).toBe(msg.text);
+  });
+
+  test("ntfy: honors NTFY_SERVER + attaches Bearer token when NTFY_TOKEN set", async () => {
+    let captured: any = null;
+    globalThis.fetch = (async (url: any, init: any) => {
+      captured = { url: String(url), headers: init.headers };
+      return new Response("", { status: 200 });
+    }) as unknown as typeof fetch;
+    process.env.NTFY_SERVER = "https://ntfy.example.com/";
+    process.env.NTFY_TOKEN = "tk_secret";
+
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await notifyOne("ntfy:topic", msg);
+
+    expect(captured.url).toBe("https://ntfy.example.com/topic");
+    expect(captured.headers.Authorization).toBe("Bearer tk_secret");
+  });
+
+  test("ntfy: a non-2xx response throws so notify() logs the failure", async () => {
+    globalThis.fetch = (async () => new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
+    const msg = buildAlertMessage(job(), 88000, TS);
+    await expect(notifyOne("ntfy:topic", msg)).rejects.toThrow(/status 403/);
   });
 });
