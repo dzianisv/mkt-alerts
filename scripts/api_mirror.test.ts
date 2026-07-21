@@ -339,4 +339,22 @@ describe("POST channel validation + fail-loud persistence", () => {
       writeFileSync(STORE_PATH, good); // restore for any later tests
     }
   });
+
+  // Fresh-VM regression: ~/.config/mkt/config.yaml does not exist yet. A POST that
+  // projects to the daemon config (default global push) used to throw ENOENT in
+  // loadMktConfig() → 500 → no alert could ever be armed (the real cause of the
+  // empty-VM-store outage). loadMktConfig() must treat a missing file as empty and
+  // saveMktConfig() must create the dir, so the first alert bootstraps config.yaml.
+  test("missing config.yaml is bootstrapped by the first projecting POST (no 500)", async () => {
+    rmSync(MKT_CONFIG, { force: true });
+    expect(existsSync(MKT_CONFIG)).toBe(false);
+    const res = await handleRequest(req("POST", "/alerts", {
+      symbol: "BOOTSTRAP-USD",
+      reasoning: "no channels → default global push → must touch config.yaml",
+      conditions: [{ condition: "below", value: 1 }],
+    }));
+    expect(res.status).toBe(201);
+    expect(existsSync(MKT_CONFIG)).toBe(true);
+    expect(configHasSymbol("BOOTSTRAP-USD")).toBe(true);
+  });
 });

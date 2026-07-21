@@ -251,6 +251,24 @@ if [[ -f /tmp/package.json ]]; then
   cd "\$MKT_SCRIPTS" && bun install --quiet
 fi
 
+# ── mkt config bootstrap ──────────────────────────────────────────────────────
+# The mkt Go daemon AND the Bun api (loadMktConfig) both read
+# ~/.config/mkt/config.yaml. On a fresh VM this file does not exist, which turned
+# every POST /alerts into a 500 (ENOENT) — no alert could ever be armed. Create a
+# minimal valid config once; never clobber an existing one.
+mkdir -p \$HOME/.config/mkt \$HOME/.config/mkt-watch
+if [[ ! -f \$HOME/.config/mkt/config.yaml ]]; then
+  cat > \$HOME/.config/mkt/config.yaml <<'YAML'
+watchlist: []
+portfolios: []
+alerts: []
+poll_interval: 60s
+YAML
+  echo "  ✓ created ~/.config/mkt/config.yaml"
+else
+  echo "  ~/.config/mkt/config.yaml already present"
+fi
+
 # ── env / secrets ─────────────────────────────────────────────────────────────
 # Install in one atomic step with mode 600 (no world-readable window), then remove
 # the uploaded copy so the secret never lingers in /tmp (the EXIT trap is a backstop).

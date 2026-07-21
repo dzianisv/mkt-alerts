@@ -144,11 +144,29 @@ function saveMeta(meta: AlertMeta[]): void {
 // ── mkt config helpers ────────────────────────────────────────────────────────
 
 function loadMktConfig(): MktConfig {
+  // The mkt Go daemon lazily creates config.yaml on first write, so on a fresh
+  // VM the file legitimately does not exist yet. A bare readFileSync here throws
+  // ENOENT and turns every POST/DELETE /alerts into a 500 — which silently
+  // stops any alert from ever being armed. Treat a missing file as an empty
+  // config instead so the first alert bootstraps it.
+  if (!existsSync(MKT_CONFIG)) {
+    return { watchlist: [], portfolios: [], alerts: [], poll_interval: "60s" };
+  }
   const raw = readFileSync(MKT_CONFIG, "utf8");
-  return YAML.parse(raw) as MktConfig;
+  const parsed = (YAML.parse(raw) ?? {}) as Partial<MktConfig>;
+  // An empty or partial file (e.g. only `watchlist:`) must not leave `alerts`
+  // undefined — callers spread `cfg.alerts` and would crash on undefined.
+  return {
+    watchlist: parsed.watchlist ?? [],
+    portfolios: parsed.portfolios ?? [],
+    alerts: parsed.alerts ?? [],
+    poll_interval: parsed.poll_interval ?? "60s",
+    ...parsed,
+  };
 }
 
 function saveMktConfig(cfg: MktConfig): void {
+  mkdirSync(dirname(MKT_CONFIG), { recursive: true });
   const tmp = MKT_CONFIG + ".tmp";
   writeFileSync(tmp, YAML.stringify(cfg));
   renameSync(tmp, MKT_CONFIG);
