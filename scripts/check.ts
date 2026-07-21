@@ -294,8 +294,7 @@ export async function deliverEmail(to: string, msg: AlertMessage): Promise<void>
     try {
       const server = (process.env.NTFY_SERVER?.trim() || "https://ntfy.sh").replace(/\/+$/, "");
       // HTTP headers must be latin-1: strip non-ASCII (emoji) from the Title.
-      const asciiSubject = msg.subject.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
-      const headers: Record<string, string> = { "Content-Type": "text/plain", Title: asciiSubject, Email: to };
+      const headers: Record<string, string> = { "Content-Type": "text/plain", Title: asciiHeader(msg.subject), Email: to };
       // ntfy.sh blocks ANONYMOUS email sending - the Email header needs a token.
       const token = process.env.NTFY_TOKEN?.trim();
       if (token) headers.Authorization = `Bearer ${token}`;
@@ -330,6 +329,13 @@ export async function deliverEmail(to: string, msg: AlertMessage): Promise<void>
 }
 
 /** Send a fired alert over one channel spec (single prefix:value token). */
+// HTTP header values must be latin-1; ntfy carries the alert subject in the
+// `Title` header, so any emoji/unicode in the subject (e.g. the 🔔 prefix) makes
+// Bun's fetch throw `Header 'Title' has invalid value`. Strip to printable ASCII.
+export function asciiHeader(s: string): string {
+  return s.replace(/[^\x20-\x7E]/g, "").replace(/\s+/g, " ").trim();
+}
+
 export async function notifyOne(channel: string, msg: AlertMessage): Promise<void> {
   if (channel === "stdout") {
     console.log(msg.text);
@@ -346,11 +352,17 @@ export async function notifyOne(channel: string, msg: AlertMessage): Promise<voi
   }
   if (channel.startsWith("ntfy:")) {
     const topic = channel.slice("ntfy:".length);
-    await fetch(`https://ntfy.sh/${topic}`, {
-      method: "POST",
-      body: msg.text,
-      headers: { "Content-Type": "text/plain", Title: msg.subject },
-    });
+    const server = (process.env.NTFY_SERVER?.trim() || "https://ntfy.sh").replace(/\/+$/, "");
+    const headers: Record<string, string> = { "Content-Type": "text/plain", Title: asciiHeader(msg.subject) };
+    // Authenticate when a token is available so private topics work; harmless for
+    // public topics (anonymous push is allowed either way).
+    const token = process.env.NTFY_TOKEN?.trim();
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const res = await fetch(`${server}/${topic}`, { method: "POST", body: msg.text, headers });
+    if (!res.ok) {
+      const detail = await res.text().catch(() => "");
+      throw new Error(`ntfy ${server}/${topic} -> status ${res.status} ${detail}`.trim());
+    }
     return;
   }
   // telegram-bot: uses the Bot API directly (no Telethon session required).

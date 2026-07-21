@@ -326,6 +326,11 @@ SVC
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now mkt-api
+# `enable --now` only STARTS a stopped unit; it will NOT reload code into an
+# already-running mkt-api. Without this explicit restart a deploy silently keeps
+# serving the OLD api.ts (this stranded a June build for weeks, so every armed
+# alert was written meta-only and never mirrored into the checker store).
+sudo systemctl restart mkt-api
 sleep 2
 sudo systemctl is-active mkt-api && echo "  ✓ mkt-api active"
 
