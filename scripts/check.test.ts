@@ -3,8 +3,8 @@
 // No real emails/pushes are sent — the transport fetch is mocked.
 
 import { test, expect, describe, afterEach } from "bun:test";
-import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, notifyOne, asciiHeader, deliverEmail, type AlertMessage } from "./check.ts";
-import type { AlertJob } from "./store.ts";
+import { buildAlertMessage, sendEmail, sendBrevoEmail, notify, notifyOne, asciiHeader, deliverEmail, evaluateJob, type AlertMessage } from "./check.ts";
+import type { AlertJob, Cond } from "./store.ts";
 
 function job(overrides: Partial<AlertJob> = {}): AlertJob {
   return {
@@ -376,5 +376,36 @@ describe("notifyOne — ntfy push (Title header emoji regression)", () => {
     globalThis.fetch = (async () => new Response("forbidden", { status: 403 })) as unknown as typeof fetch;
     const msg = buildAlertMessage(job(), 88000, TS);
     await expect(notifyOne("ntfy:topic", msg)).rejects.toThrow(/status 403/);
+  });
+});
+
+describe("pine conditions (evaluateJob reads pre-computed pineSignals)", () => {
+  test("fires when the pine signal is true, and labels the plot in detail", () => {
+    const pineCond: Cond = { condition: "pine", value: 0, signalPlot: "signal", fireOn: "truthy" };
+    const j = job({ conditions: [pineCond], channel: "stdout" });
+    const pineSignals = new Map<Cond, boolean>([[pineCond, true]]);
+    const { fires, detail } = evaluateJob(j, { price: 66553.33, pineSignals });
+    expect(fires).toBe(true);
+    expect(detail).toContain("pine:signal=✓");
+  });
+
+  test("does not fire when the pine signal is false", () => {
+    const pineCond: Cond = { condition: "pine", value: 0, signalPlot: "signal" };
+    const j = job({ conditions: [pineCond], channel: "stdout" });
+    const pineSignals = new Map<Cond, boolean>([[pineCond, false]]);
+    expect(evaluateJob(j, { price: 100, pineSignals }).fires).toBe(false);
+  });
+
+  test("a pine condition absent from the map defaults to no-fire (fail-safe)", () => {
+    const pineCond: Cond = { condition: "pine", value: 0 };
+    const j = job({ conditions: [pineCond], channel: "stdout" });
+    expect(evaluateJob(j, { price: 100 }).fires).toBe(false);
+  });
+
+  test("custom signalPlot name surfaces in detail", () => {
+    const pineCond: Cond = { condition: "pine", value: 0, signalPlot: "buy" };
+    const j = job({ conditions: [pineCond], channel: "stdout" });
+    const pineSignals = new Map<Cond, boolean>([[pineCond, true]]);
+    expect(evaluateJob(j, { price: 100, pineSignals }).detail).toContain("pine:buy=✓");
   });
 });

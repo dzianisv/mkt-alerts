@@ -4,10 +4,18 @@ import { rsi, macd, sma } from "./indicators.ts";
 
 const MKT_BIN = `${process.env.HOME}/.local/bin/mkt`;
 
+// Pine conditions are evaluated by an isolated AGPL subprocess (pine-runner/),
+// resolved relative to this file so the same layout works locally and on the VM
+// (scripts/ and pine-runner/ are siblings in both). Override with PINE_RUNNER.
+const PINE_RUNNER = process.env.PINE_RUNNER ?? new URL("../pine-runner/run.ts", import.meta.url).pathname;
+
 export type JobData = {
   price: number;
   changePct?: number; // e.g. -2.30 for -2.30%
   closes?: number[];
+  // Pine signals are pre-computed out-of-process (main loop) and keyed by cond
+  // identity, mirroring how `closes` are pre-fetched so evalCond stays pure.
+  pineSignals?: Map<Cond, boolean>;
 };
 
 /** Evaluate a single condition against provided data. Returns true if condition fires. */
@@ -57,6 +65,10 @@ function evalCond(cond: Cond, data: JobData): boolean {
       // fires when histogram flips sign (any direction)
       return (m.prevHist < 0 && m.hist > 0) || (m.prevHist > 0 && m.hist < 0);
     }
+    case "pine":
+      // Pre-computed by the main loop via the isolated pine-runner subprocess and
+      // passed in through data.pineSignals (keyed by cond identity).
+      return data.pineSignals?.get(cond) ?? false;
     default:
       return false;
   }
@@ -83,7 +95,12 @@ export function evaluateJob(job: AlertJob, data: JobData): { fires: boolean; det
   }
 
   const detail = results
-    .map(r => `${r.cond.condition}:${r.cond.value}=${r.fires ? "✓" : "✗"}(price=${data.price})`)
+    .map(r => {
+      const label = r.cond.condition === "pine"
+        ? `pine:${r.cond.signalPlot ?? "signal"}`
+        : `${r.cond.condition}:${r.cond.value}`;
+      return `${label}=${r.fires ? "✓" : "✗"}(price=${data.price})`;
+    })
     .join(", ");
 
   return { fires, detail };
@@ -166,6 +183,69 @@ async function fetchCloses(symbol: string, limit = 60): Promise<number[]> {
     } catch {}
   }
   throw new Error(`could not fetch closes for ${symbol}`);
+}
+
+type Candle = { open: number; high: number; low: number; close: number; volume: number; openTime: number };
+
+/**
+ * Fetch OHLCV candles via mkt mcp query_history. Pine needs full OHLCV (not just
+ * closes), oldest-first, shaped exactly as PineTS expects.
+ */
+async function fetchOHLCV(symbol: string, limit = 120): Promise<Candle[]> {
+  const mcpLines = [
+    JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2024-11-05", capabilities: {}, clientInfo: { name: "check", version: "0" } } }),
+    JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }),
+    JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "query_history", arguments: { symbol, limit } } }),
+  ].join("\n") + "\n";
+
+  const proc = Bun.spawn([MKT_BIN, "mcp"], {
+    stdin: "pipe", stdout: "pipe", stderr: "pipe",
+    env: { ...process.env, PATH: `${process.env.HOME}/.local/bin:${process.env.PATH}` },
+  });
+  proc.stdin.write(mcpLines);
+  proc.stdin.end();
+  const output = await new Response(proc.stdout).text();
+  await proc.exited;
+
+  const re = /(\d{4}-\d{2}-\d{2})\s+O=([0-9.]+)\s+H=([0-9.]+)\s+L=([0-9.]+)\s+C=([0-9.]+)\s+V=([0-9.]+)/;
+  for (const line of output.split("\n")) {
+    const t = line.trim();
+    if (!t.startsWith("{")) continue;
+    let obj: any;
+    try { obj = JSON.parse(t); } catch { continue; }
+    if (obj.id === 2 && obj.result?.content?.[0]?.text) {
+      const text: string = obj.result.content[0].text;
+      const candles: Candle[] = [];
+      for (const row of text.split("\n")) {
+        const m = row.match(re);
+        if (m) candles.push({
+          openTime: new Date(`${m[1]}T00:00:00Z`).getTime(),
+          open: parseFloat(m[2]), high: parseFloat(m[3]), low: parseFloat(m[4]),
+          close: parseFloat(m[5]), volume: parseFloat(m[6]),
+        });
+      }
+      if (!candles.length) throw new Error(`no OHLCV rows parsed for ${symbol}`);
+      return candles;
+    }
+  }
+  throw new Error(`could not fetch OHLCV for ${symbol}`);
+}
+
+type PineSignal = { crossedUp: boolean; crossedDown: boolean; truthy: boolean; last: number; prev: number | null };
+
+/** Evaluate a Pine script's signal plot via the isolated pine-runner subprocess. */
+async function runPineSignal(script: string, candles: Candle[], signalPlot: string): Promise<PineSignal> {
+  const proc = Bun.spawn(["bun", PINE_RUNNER], { stdin: "pipe", stdout: "pipe", stderr: "pipe", env: { ...process.env } });
+  proc.stdin.write(JSON.stringify({ script, candles, signalPlot }));
+  proc.stdin.end();
+  const [out, err] = await Promise.all([new Response(proc.stdout).text(), new Response(proc.stderr).text()]);
+  await proc.exited;
+  const lastLine = out.trim().split("\n").filter(Boolean).pop() ?? "";
+  let res: any;
+  try { res = JSON.parse(lastLine); }
+  catch { throw new Error(`pine-runner bad output: ${(out || err || "").slice(0, 500)}`); }
+  if (!res.ok) throw new Error(res.error || err || "pine-runner failed");
+  return { crossedUp: !!res.crossedUp, crossedDown: !!res.crossedDown, truthy: !!res.truthy, last: res.last, prev: res.prev ?? null };
 }
 
 // ── Message building ────────────────────────────────────────────────────────
@@ -413,6 +493,11 @@ function needsCloses(cond: Cond): boolean {
   );
 }
 
+/** True when the condition is a Pine Script signal (evaluated out-of-process). */
+function isPine(cond: Cond): boolean {
+  return cond.condition === "pine";
+}
+
 async function main() {
   // Check mkt is accessible
   const which = Bun.spawnSync(["which", "mkt"], {
@@ -448,7 +533,24 @@ async function main() {
       if (job.conditions.some(needsCloses)) {
         closes = await fetchCloses(job.symbol);
       }
-      data = { price, changePct, closes };
+      let pineSignals: Map<Cond, boolean> | undefined;
+      const pineConds = job.conditions.filter(isPine);
+      if (pineConds.length) {
+        const candles = await fetchOHLCV(job.symbol);
+        pineSignals = new Map<Cond, boolean>();
+        for (const c of pineConds) {
+          try {
+            const sig = await runPineSignal(c.script!, candles, c.signalPlot ?? "signal");
+            const fired = c.fireOn === "truthy" ? sig.truthy : sig.crossedUp;
+            pineSignals.set(c, fired);
+            console.log(`[${job.id}] pine ${c.signalPlot ?? "signal"} last=${sig.last} prev=${sig.prev} crossUp=${sig.crossedUp} truthy=${sig.truthy} → ${fired}`);
+          } catch (e) {
+            console.error(`[${job.id}] pine eval error: ${e}`);
+            pineSignals.set(c, false);
+          }
+        }
+      }
+      data = { price, changePct, closes, pineSignals };
     } catch (e) {
       console.error(`[${job.id}] error fetching data: ${e}`);
       continue;

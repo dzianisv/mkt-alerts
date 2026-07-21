@@ -1,0 +1,13 @@
+{
+  "name": "pine-runner",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Isolated AGPL-3.0 subprocess that executes Pine Script v5 via PineTS. Never imported by mkt-alerts.ts or the root package.",
+  "license": "AGPL-3.0-only",
+  "scripts": {
+    "selftest": "bun run selftest.ts"
+  },
+  "dependencies": {
+    "pinets": "0.9.29"
+  }
+}

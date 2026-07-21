@@ -51,6 +51,10 @@ type AlertSubCondition = {
   condition: string;
   value: number;
   period?: number;
+  // Pine conditions (condition === "pine") only.
+  script?: string;
+  signalPlot?: string;
+  fireOn?: "cross_up" | "truthy";
 };
 
 type AlertRule = {
@@ -108,6 +112,7 @@ const VALID_CONDITIONS = [
   "rsi_above", "rsi_below",
   "sma_cross_above", "sma_cross_below",
   "macd_cross", "volume_above", "stddev_above",
+  "pine",
 ] as const;
 
 // ── Mutex (simple async lock) ─────────────────────────────────────────────────
@@ -406,9 +411,16 @@ export async function handlePostAlert(req: Request): Promise<Response> {
 
   // Routes the Go daemon cannot deliver (email etc.) must be mirrored into the
   // checker store, keyed by the SAME id as the meta entry so DELETE removes both.
-  const mirrorChannels = checkerChannels(channels, NTFY_TOPIC);
+  // Pine conditions are evaluated by the checker's isolated pine-runner subprocess;
+  // the Go daemon cannot execute Pine. So a pine alert is ALWAYS checker-managed
+  // (never projected to config.yaml) and must be mirrored to the checker store even
+  // under the default route — fall back to the global ntfy topic so it still delivers.
+  const hasPine = conditions.some((c: AlertSubCondition) => c.condition === "pine");
+  const mirrorChannels = hasPine
+    ? (checkerChannels(channels, "").length ? checkerChannels(channels, "") : [`ntfy:${NTFY_TOPIC}`])
+    : checkerChannels(channels, NTFY_TOPIC);
   // Whether this alert belongs in the daemon's config (default/global-push routes).
-  const projectToDaemon = daemonShouldProject(channels, NTFY_TOPIC);
+  const projectToDaemon = !hasPine && daemonShouldProject(channels, NTFY_TOPIC);
 
   try {
     await withLock(async () => {

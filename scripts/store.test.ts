@@ -202,3 +202,30 @@ describe("concurrent mutations — no lost update", () => {
     expect(finalIds).toHaveLength(seeds.length + N);
   }, 30_000);
 });
+
+describe("pine condition validation (addJob)", () => {
+  test("accepts a pine condition that carries a non-empty script", () => {
+    const j = addJob(baseJob({
+      conditions: [{ condition: "pine", value: 0, signalPlot: "signal",
+        script: "//@version=5\nindicator(\"x\")\nplot(1,\"signal\")" }],
+      channel: "stdout",
+    }) as any);
+    expect(j.conditions[0].condition).toBe("pine");
+    expect(j.conditions[0].script).toContain("plot(1");
+    expect(loadJobs().find(x => x.id === j.id)?.conditions[0].signalPlot).toBe("signal");
+  });
+
+  test("rejects a pine condition with no script", () => {
+    expect(() => addJob(baseJob({
+      conditions: [{ condition: "pine", value: 0 }],
+      channel: "stdout",
+    }) as any)).toThrow(/pine condition requires a non-empty/);
+  });
+
+  test("rejects a pine condition with a blank script", () => {
+    expect(() => addJob(baseJob({
+      conditions: [{ condition: "pine", value: 0, script: "   " }],
+      channel: "stdout",
+    }) as any)).toThrow(/script/);
+  });
+});
