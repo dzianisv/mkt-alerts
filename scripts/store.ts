@@ -47,7 +47,17 @@ function lockPath(): string {
   return storePath() + ".lock";
 }
 
-export type Cond = { condition: string; value: number; period?: number };
+export type Cond = {
+  condition: string;
+  value: number;
+  period?: number;
+  // Pine Script conditions only (condition === "pine"): the Pine v5/v6 source and
+  // which plot carries the fire signal. Evaluated out-of-process by pine-runner/
+  // (AGPL, isolated) — never bundled into the published MIT CLI.
+  script?: string;
+  signalPlot?: string;
+  fireOn?: "cross_up" | "truthy";
+};
 
 export type AlertJob = {
   id: string;
@@ -314,6 +324,7 @@ export const VALID_CONDITIONS = [
   "sma_cross_above", "sma_cross_below",
   "macd_cross",
   "volume_above", "stddev_above",
+  "pine",
 ] as const;
 
 export function addJob(
@@ -327,6 +338,10 @@ export function addJob(
       throw new Error(
         `invalid condition "${c.condition}". Valid: ${VALID_CONDITIONS.join(", ")}`
       );
+    }
+    // Pine conditions carry their logic in `script`, not a numeric threshold.
+    if (c.condition === "pine" && !c.script?.trim()) {
+      throw new Error('pine condition requires a non-empty "script"');
     }
   }
 

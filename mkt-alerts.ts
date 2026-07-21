@@ -76,6 +76,9 @@ commands:
           --condition <cond>    condition (below, above, rsi_below, …); repeat for compound
           --value <num>         threshold; one per --condition
           --reason <text>       why you set this alert
+          [--pine <file.pine>]  Pine Script alert (runs off-TradingView); replaces --condition/--value
+          [--signal <plot>]     Pine plot that carries the signal (default: "signal")
+          [--fire-on <mode>]    cross_up (default) | truthy — when a pine alert fires
           [--link <url>]        optional analysis URL in the notification
           [--cooldown <sec>]    re-alert after N seconds (default: one-shot)
           [--desk crypto|stocks]
@@ -89,7 +92,7 @@ commands:
 valid conditions:
   above, below, pct_up, pct_down,
   rsi_above, rsi_below, sma_cross_above, sma_cross_below,
-  macd_cross, volume_above, stddev_above
+  macd_cross, volume_above, stddev_above, pine
 
 config: ${AUTH_PATH}`);
   process.exit(0);
@@ -127,6 +130,7 @@ if (sub === "subscribe") {
 } else if (sub === "add") {
   const symbol     = flag(args, "symbol")    ?? die("--symbol required");
   const reasoning  = flag(args, "reason")    ?? die("--reason required");
+  const pineFile   = flag(args, "pine");
   const conditions = flagAll(args, "condition");
   const values     = flagAll(args, "value");
   const desk       = flag(args, "desk")      ?? "crypto";
@@ -134,8 +138,22 @@ if (sub === "subscribe") {
   const cooldown   = flag(args, "cooldown");
   const channels   = flagAll(args, "channel");
 
-  if (!conditions.length) die("--condition required");
-  if (conditions.length !== values.length) die("each --condition needs a --value");
+  // Pine Script alert path: --pine <file.pine> [--signal <plot>] [--fire-on cross_up|truthy].
+  // The script is evaluated off-TradingView by the checker's isolated pine-runner
+  // subprocess; it replaces the --condition/--value threshold form.
+  let builtConditions: Array<Record<string, unknown>>;
+  if (pineFile) {
+    if (!existsSync(pineFile)) die(`--pine file not found: ${pineFile}`);
+    const script = readFileSync(pineFile, "utf8");
+    if (!script.trim()) die(`--pine file is empty: ${pineFile}`);
+    const fireOn = flag(args, "fire-on") ?? "cross_up";
+    if (fireOn !== "cross_up" && fireOn !== "truthy") die(`--fire-on must be "cross_up" or "truthy"`);
+    builtConditions = [{ condition: "pine", value: 0, script, signalPlot: flag(args, "signal") ?? "signal", fireOn }];
+  } else {
+    if (!conditions.length) die("--condition required (or use --pine <file>)");
+    if (conditions.length !== values.length) die("each --condition needs a --value");
+    builtConditions = conditions.map((c, i) => ({ condition: c, value: parseFloat(values[i]) }));
+  }
 
   // Validate delivery channels. Recipient is carried after the prefix, e.g.
   //   --channel email:you@example.com
@@ -152,7 +170,7 @@ if (sub === "subscribe") {
   // Hard gate: price-level conditions require --data-source.
   // Prevents fabricated support/resistance levels from being stored.
   // Indicator conditions (rsi_above, rsi_below, macd_cross, etc.) are exempt.
-  const priceConditions = conditions.filter(c => c === "above" || c === "below");
+  const priceConditions = pineFile ? [] : conditions.filter(c => c === "above" || c === "below");
   if (priceConditions.length > 0) {
     const dataSource = flag(args, "data-source");
     if (!dataSource?.trim()) {
@@ -174,7 +192,7 @@ if (sub === "subscribe") {
     symbol: symbol.toUpperCase(),
     reasoning: finalReasoning,
     desk,
-    conditions: conditions.map((c, i) => ({ condition: c, value: parseFloat(values[i]) })),
+    conditions: builtConditions,
     ...(link            ? { analysisLink: link }              : {}),
     ...(cooldown        ? { cooldownSec: parseInt(cooldown) } : {}),
     ...(channels.length ? { channels }                        : {}),

@@ -207,6 +207,11 @@ for f in api.ts dividend_watch.ts check.ts store.ts indicators.ts package.json; 
   [[ -f "$SCRIPT_DIR/scripts/$f" ]] && SCP "$SCRIPT_DIR/scripts/$f" "/tmp/$f"
 done
 
+# pine-runner: isolated AGPL Pine Script engine (own package, NOT part of the MIT
+# npm CLI). The checker shells out to it as a subprocess for `pine` conditions.
+SCP "$SCRIPT_DIR/pine-runner/run.ts"      "/tmp/pine-runner-run.ts"
+SCP "$SCRIPT_DIR/pine-runner/package.json" "/tmp/pine-runner-package.json"
+
 SSH "$(cat << REMOTE
 set -euo pipefail
 # The secret env arrives at /tmp/mkt-daemon.env; guarantee it is removed on exit
@@ -249,6 +254,18 @@ done
 if [[ -f /tmp/package.json ]]; then
   cp /tmp/package.json "\$MKT_SCRIPTS/"
   cd "\$MKT_SCRIPTS" && bun install --quiet
+fi
+
+# ── pine-runner (isolated AGPL Pine engine) ───────────────────────────────────
+# Deployed as a SIBLING of scripts/ so check.ts resolves ../pine-runner/run.ts.
+# Its own package (own node_modules, own AGPL license) — never linked into the
+# MIT-published CLI. The checker spawns it as a subprocess for 'pine' conditions.
+PINE_DIR=\$HOME/.agents/skills/mkt/pine-runner
+mkdir -p "\$PINE_DIR"
+[[ -f /tmp/pine-runner-run.ts ]]      && cp /tmp/pine-runner-run.ts "\$PINE_DIR/run.ts"
+[[ -f /tmp/pine-runner-package.json ]] && cp /tmp/pine-runner-package.json "\$PINE_DIR/package.json"
+if [[ -f "\$PINE_DIR/package.json" ]]; then
+  cd "\$PINE_DIR" && bun install --quiet && echo "  ✓ pine-runner installed (pinets)"
 fi
 
 # ── mkt config bootstrap ──────────────────────────────────────────────────────
@@ -326,7 +343,7 @@ SVC
 
 sudo systemctl daemon-reload
 sudo systemctl enable --now mkt-api
-# `enable --now` only STARTS a stopped unit; it will NOT reload code into an
+# 'enable --now' only STARTS a stopped unit; it will NOT reload code into an
 # already-running mkt-api. Without this explicit restart a deploy silently keeps
 # serving the OLD api.ts (this stranded a June build for weeks, so every armed
 # alert was written meta-only and never mirrored into the checker store).
