@@ -1,0 +1,89 @@
+{
+  "id": "mkt-alerts",
+  "name": "Market Alerts",
+  "description": "Watches public market data and wakes the agent when your alert conditions fire.",
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {
+      "intervalSec": {
+        "type": "number",
+        "minimum": 10,
+        "description": "Poll cadence in seconds (default 60, floored at 10)."
+      },
+      "agentId": {
+        "type": "string",
+        "description": "Target agent for the wake (default \"main\")."
+      },
+      "dataSource": {
+        "type": "string",
+        "enum": ["auto", "coinbase", "yahoo"],
+        "description": "Force a data source instead of routing by desk (default auto)."
+      },
+      "alertsFile": {
+        "type": "string",
+        "description": "Optional absolute path to a JSON file holding an AlertJob[] (merged with inline alerts)."
+      },
+      "alerts": {
+        "type": "array",
+        "description": "Inline alert definitions.",
+        "items": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["symbol", "conditions", "reasoning"],
+          "properties": {
+            "id": { "type": "string" },
+            "desk": { "type": "string", "description": "\"crypto\" (Coinbase) or \"stocks\" (Yahoo)." },
+            "symbol": { "type": "string", "description": "e.g. BTC-USD (crypto) or AAPL (stock)." },
+            "match": { "type": "string", "enum": ["all", "any", "sequence"] },
+            "reasoning": { "type": "string" },
+            "channel": { "type": "string" },
+            "channels": { "type": "array", "items": { "type": "string" } },
+            "expiry": { "type": "string" },
+            "cooldownSec": { "type": "number" },
+            "analysisLink": { "type": "string" },
+            "conditions": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["condition", "value"],
+                "properties": {
+                  "condition": {
+                    "type": "string",
+                    "enum": [
+                      "above",
+                      "below",
+                      "pct_up",
+                      "pct_down",
+                      "rsi_above",
+                      "rsi_below",
+                      "sma_cross_above",
+                      "sma_cross_below",
+                      "macd_cross",
+                      "volume_above",
+                      "stddev_above",
+                      "pine"
+                    ]
+                  },
+                  "value": { "type": "number" },
+                  "period": { "type": "number" },
+                  "script": { "type": "string" },
+                  "signalPlot": { "type": "string" },
+                  "fireOn": { "type": "string", "enum": ["cross_up", "truthy"] }
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "uiHints": {
+    "intervalSec": { "label": "Poll interval (s)", "help": "How often to check the market (min 10s)." },
+    "agentId": { "label": "Agent", "help": "Which agent to wake when an alert fires (default main)." },
+    "dataSource": { "label": "Data source", "help": "auto = Coinbase for crypto, Yahoo for stocks." },
+    "alertsFile": { "label": "Alerts file", "help": "Absolute path to an AlertJob[] JSON file." }
+  }
+}

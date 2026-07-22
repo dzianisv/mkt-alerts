@@ -1,0 +1,22 @@
+{
+  "name": "@vibetechnologies/openclaw-mkt-alerts",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "OpenClaw plugin: watches public market data and wakes the agent when alert conditions fire.",
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "verify": "node --experimental-strip-types verify-harness.ts",
+    "verify:fetch": "node --experimental-strip-types fetch-check.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.1",
+    "openclaw": "2026.7.1-2",
+    "typescript": "^5.7.3"
+  }
+}
