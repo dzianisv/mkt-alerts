@@ -1,5 +1,4 @@
-#!/usr/bin/env bun
-// @bun
+#!/usr/bin/env node
 
 // mkt-alerts.ts
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, unlinkSync } from "fs";
@@ -84,11 +83,11 @@ async function ensureMkt() {
   const binName = process.platform === "win32" ? "mkt.exe" : "mkt";
   const binPath = join(dir, binName);
   if (existsSync(binPath)) {
-    console.log(`\u2713  mkt engine already cached \u2192 ${binPath}`);
+    console.log(`✓  mkt engine already cached → ${binPath}`);
     return binPath;
   }
   const url = `https://github.com/stxkxs/mkt/releases/download/v${MKT_VERSION}/mkt_${MKT_VERSION}_${asset}.${ext}`;
-  process.stdout.write(`\u2B07\uFE0F   Downloading mkt engine (${asset}) \u2026 `);
+  process.stdout.write(`⬇️   Downloading mkt engine (${asset}) … `);
   let buf;
   try {
     const res = await fetch(url);
@@ -101,7 +100,7 @@ async function ensureMkt() {
   const archivePath = join(dir, `mkt_${MKT_VERSION}_${asset}.${ext}`);
   writeFileSync(archivePath, buf);
   console.log(`done (${(buf.length / 1048576).toFixed(1)} MB)`);
-  process.stdout.write(`\uD83D\uDCE6  Extracting \u2026 `);
+  process.stdout.write(`\uD83D\uDCE6  Extracting … `);
   try {
     if (ext === "tar.gz") {
       try {
@@ -126,7 +125,7 @@ async function ensureMkt() {
     die(`extraction did not produce ${binName} in ${dir}`);
   if (process.platform !== "win32")
     chmodSync(binPath, 493);
-  console.log(`done \u2192 ${binPath}`);
+  console.log(`done → ${binPath}`);
   return binPath;
 }
 function freePort() {
@@ -163,14 +162,14 @@ async function pollQuote(port, symbol, timeoutMs) {
 }
 async function runTry() {
   console.log(`
-\uD83D\uDE80  mkt-alerts try \u2014 zero-signup local demo
+\uD83D\uDE80  mkt-alerts try — zero-signup local demo
 `);
   console.log(`    Downloads the mkt engine, runs a live price check on 127.0.0.1, and fires`);
   console.log(`    a DEMO alert against a real market price. No signup, no API key, no auth.json.`);
-  console.log(`    One-shot local demo of the core evaluation loop \u2014 not a persistent daemon.
+  console.log(`    One-shot local demo of the core evaluation loop — not a persistent daemon.
 `);
   const binPath = await ensureMkt();
-  process.stdout.write(`\uD83C\uDF31  Seeding watchlist (${TRY_SYMBOL}) \u2026 `);
+  process.stdout.write(`\uD83C\uDF31  Seeding watchlist (${TRY_SYMBOL}) … `);
   try {
     execFileSync(binPath, ["config", "add", TRY_SYMBOL], { stdio: "ignore", env: process.env });
     console.log("done");
@@ -179,7 +178,7 @@ async function runTry() {
   }
   const port = await freePort();
   let daemonOutput = "";
-  process.stdout.write(`\u2699\uFE0F   Starting local mkt engine on 127.0.0.1:${port} `);
+  process.stdout.write(`⚙️   Starting local mkt engine on 127.0.0.1:${port} `);
   mktDaemon = spawn(binPath, ["daemon", "--listen", `127.0.0.1:${port}`], {
     stdio: ["ignore", "pipe", "pipe"],
     env: process.env
@@ -206,25 +205,25 @@ ${daemonOutput.trim()}` : "The mkt engine produced no output."));
   const t2 = threshold.toFixed(2);
   console.log("");
   if (fired) {
-    console.log(`\uD83D\uDD14 ALERT FIRED \u2014 ${TRY_SYMBOL} is $${p2}, above your $${t2} threshold`);
+    console.log(`\uD83D\uDD14 ALERT FIRED — ${TRY_SYMBOL} is $${p2}, above your $${t2} threshold`);
     console.log(`   (live price from your local mkt engine, evaluated on 127.0.0.1, zero signup, zero API key)`);
   } else {
     console.log(`Quote is $${p2}; demo threshold $${t2} did not trigger.`);
   }
   cleanupDaemon();
   console.log(`
-\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500`);
+─────────────────────────────────────────────────────────────`);
   console.log(`What just happened: a real live ${TRY_SYMBOL} price was fetched by a local mkt`);
   console.log(`engine and evaluated with the same "above" rule the product uses. The engine`);
-  console.log(`has now been stopped \u2014 nothing keeps running, and no alert was persisted.
+  console.log(`has now been stopped — nothing keeps running, and no alert was persisted.
 `);
   console.log(`Next steps:`);
-  console.log(`  \u2022 Install as a Claude Code skill (agents set alerts right after analysis):`);
+  console.log(`  • Install as a Claude Code skill (agents set alerts right after analysis):`);
   console.log(`      npx skills add github.com/dzianisv/mkt-alerts/ -s mkt-alerts -y`);
-  console.log(`    \u2014 see the README section "Install as a Claude Code skill".`);
-  console.log(`  \u2022 Deploy your own always-on instance (optional) for 24/7 push alerts \u2014`);
+  console.log(`    — see the README section "Install as a Claude Code skill".`);
+  console.log(`  • Deploy your own always-on instance (optional) for 24/7 push alerts —`);
   console.log(`    see the README section "Deploy your own always-on instance".`);
-  console.log(`  \u2022 With your own instance + ~/.config/mkt-watch/auth.json, set a permanent alert:`);
+  console.log(`  • With your own instance + ~/.config/mkt-watch/auth.json, set a permanent alert:`);
   console.log(`      mkt-alerts add --symbol ${TRY_SYMBOL} --condition below --value 90000 \\`);
   console.log(`        --reason "reclaim entry" --data-source "210w OHLCV from TradingView" \\`);
   console.log(`        --channel ntfy:my-topic`);
@@ -233,18 +232,18 @@ ${daemonOutput.trim()}` : "The mkt engine produced no output."));
 var args = process.argv.slice(2);
 var sub = args[0];
 if (!sub || sub === "--help" || sub === "-h") {
-  console.log(`mkt-alerts \u2014 manage alerts on the remote mkt daemon
+  console.log(`mkt-alerts — manage alerts on the remote mkt daemon
 
 commands:
   try                           zero-signup local demo: download mkt, live price, fire a demo alert
   subscribe                     print ntfy subscribe URL
   add     --symbol <SYM>        add an alert
-          --condition <cond>    condition (below, above, rsi_below, \u2026); repeat for compound
+          --condition <cond>    condition (below, above, rsi_below, …); repeat for compound
           --value <num>         threshold; one per --condition
           --reason <text>       why you set this alert
           [--pine <file.pine>]  Pine Script alert (runs off-TradingView); replaces --condition/--value
           [--signal <plot>]     Pine plot that carries the signal (default: "signal")
-          [--fire-on <mode>]    cross_up (default) | truthy \u2014 when a pine alert fires
+          [--fire-on <mode>]    cross_up (default) | truthy — when a pine alert fires
           [--link <url>]        optional analysis URL in the notification
           [--cooldown <sec>]    re-alert after N seconds (default: one-shot)
           [--desk crypto|stocks]
@@ -294,7 +293,7 @@ if (sub === "subscribe") {
     process.exit(0);
   }
   console.log("ID".padEnd(36) + " SYMBOL".padEnd(10) + " CONDITIONS".padEnd(30) + " STATUS   REASON");
-  console.log("\u2500".repeat(110));
+  console.log("─".repeat(110));
   const now = new Date;
   for (const j of jobs) {
     const conds = j.conditions.map((c) => `${c.condition}@${c.value}`).join(",");
@@ -379,9 +378,9 @@ added alert:`);
   const emailChans = channels.filter((c) => c.startsWith("email:"));
   if (emailChans.length)
     console.log(`
-Email delivery: Brevo (primary, needs BREVO_API_KEY + ALERT_EMAIL_FROM) \u2192 ntfy-email \u2192 Resend \u2192 stdout, set where the checker runs. ALERT_EMAIL_FROM must be a verified sender; without it Brevo/Resend are skipped.`);
+Email delivery: Brevo (primary, needs BREVO_API_KEY + ALERT_EMAIL_FROM) → ntfy-email → Resend → stdout, set where the checker runs. ALERT_EMAIL_FROM must be a verified sender; without it Brevo/Resend are skipped.`);
   console.log(`
-Notification \u2192 see bun mkt-alerts.ts subscribe for your ntfy URL`);
+Notification → see bun mkt-alerts.ts subscribe for your ntfy URL`);
 } else {
   die(`unknown command: ${sub}. Run with --help.`);
 }
