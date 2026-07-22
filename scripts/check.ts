@@ -275,6 +275,9 @@ export function buildAlertMessage(job: AlertJob, price: number, isoTs: string): 
     `Why: ${job.reasoning}`,
   ];
   if (job.analysisLink) bodyLines.push(``, `Analysis: ${job.analysisLink}`);
+  // Provenance footer: names the tool that sent the alert (standard for alerting
+  // tools) and gives recipients a one-click path back to the project.
+  bodyLines.push(``, `— mkt-alerts · https://github.com/dzianisv/mkt-alerts`);
   const body = bodyLines.join("\n");
 
   // Compact form kept ~backward-compatible with the previous ntfy/telegram text.
