@@ -12,7 +12,8 @@
   "files": [
     "mkt-alerts.ts",
     "dist/",
-    ".claude/"
+    ".claude/",
+    "LICENSE"
   ],
   "repository": {
     "type": "git",
