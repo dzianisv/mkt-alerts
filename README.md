@@ -10,6 +10,49 @@ Price and indicator alert daemon you run yourself — price thresholds, RSI/MACD
 
 Deploys [mkt](https://github.com/stxkxs/mkt) as a headless engine on a **free GCP e2-micro VM** behind a **Cloudflare Tunnel** (no open firewall ports). Live demo: **https://mkt.agentlabs.cc**.
 
+## Try it locally in 60 seconds
+
+The full loop — define an alert, evaluate it against a **live, no-API-key** quote, get notified — runs entirely on `127.0.0.1` with zero signup. Every command below was run and verified end-to-end (real BTC-USD price from Coinbase, no VM, no Cloudflare, no account):
+
+```bash
+# 0. Install the mkt engine (one-time). Verified real install path:
+go install github.com/stxkxs/mkt@latest
+# or grab a prebuilt binary from https://github.com/stxkxs/mkt/releases
+
+# 1. Seed a watchlist, then start mkt headless (NOT bare `mkt --listen` — that
+#    launches the TUI too and crashes with no TTY in the background; use `daemon`):
+mkt config add BTC-USD
+mkt daemon --listen 127.0.0.1:8080 &
+
+# 2. Verify a real, live, key-free quote (Coinbase for crypto, Yahoo for stocks):
+curl http://127.0.0.1:8080/quotes/BTC-USD
+# → {"price":65983.94,"symbol":"BTC-USD"}
+
+# 3. Start the API layer that mkt-alerts.ts talks to (any values you like):
+git clone https://github.com/dzianisv/mkt-alerts && cd mkt-alerts
+API_TOKEN=local-token NTFY_TOPIC=local-test MKT_ORIGIN=http://127.0.0.1:8080 PORT=9000 \
+  bun scripts/api.ts &
+
+# 4. Point the CLI at your local API instead of the hosted one:
+mkdir -p ~/.config/mkt-watch
+echo '{"apiUrl":"http://127.0.0.1:9000","token":"local-token"}' > ~/.config/mkt-watch/auth.json
+
+# 5. Add an alert. Use --channel stdout so it's checker-managed (see caveat below):
+bun mkt-alerts.ts add --symbol BTC-USD --condition above --value 0 \
+  --reason "local trial" --data-source "local mkt quote" --channel stdout
+bun mkt-alerts.ts list
+
+# 6. Run the checker once — it fetches a fresh live quote itself (via `mkt mcp`,
+#    independent of the daemon above) and fires to stdout:
+bun scripts/check.ts
+# → [<id>] FIRED — above:0=✓(price=65983.94)
+#    🔔 mkt alert — BTC-USD fired @ 65983.94 ...
+```
+
+**Verified gotcha:** any alert that *isn't* `--channel stdout/email:.../telegram:.../ntfy:<other-topic>` (i.e. the default push, matching the top Quickstart examples above with no `--channel` flag) gets projected into `mkt`'s own config and triggers `scripts/api.ts`'s `restartMkt()`, which sends `SIGTERM` to the `mkt` process assuming **systemd** will restart it (`scripts/api.ts:190`). On a plain dev box nothing does — the daemon dies for good and that alert can never fire again locally. Either keep using `--channel stdout` for local trials, or run mkt under a trivial supervisor: `while true; do mkt daemon --listen 127.0.0.1:8080; sleep 1; done`.
+
+Production self-host (systemd, Cloudflare Tunnel, push notifications to your phone): see `deploy.sh` below.
+
 ## Why mkt-alerts
 
 - **Self-hosted, no lock-in.** Your VM, your API token, your alert data — not a vendor's account.
