@@ -1,0 +1,13 @@
+This directory (pine-runner/) contains third-party code licensed under the
+GNU Affero General Public License v3.0 (AGPL-3.0): PineTS, by LuxAlgo.
+See pine-runner/LICENSE for the full license text.
+
+pine-runner runs as a separate, optional sidecar process on the self-hosted
+checker VM. It is invoked by scripts/check.ts only to evaluate Pine Script
+alert conditions and is not required for core price/indicator alerts.
+
+pine-runner/ is NOT bundled into, nor distributed with, the MIT-licensed
+npm package @vibetechnologies/mkt-alerts.
+
+The rest of the mkt-alerts project (repo root, scripts/, the CLI) remains
+MIT licensed; only this pine-runner/ subdirectory is AGPL-3.0.

@@ -25,7 +25,19 @@
     "trading",
     "crypto",
     "stocks",
-    "ntfy"
+    "ntfy",
+    "pine-script",
+    "tradingview",
+    "tradingview-alternative",
+    "rsi",
+    "technical-analysis",
+    "market-data",
+    "notifications",
+    "telegram",
+    "self-hosted",
+    "mcp",
+    "ai-agents",
+    "algotrading"
   ],
   "license": "MIT",
   "engines": {
