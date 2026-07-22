@@ -29,17 +29,28 @@ function flagAll(args, name) {
   return out;
 }
 async function api(auth, method, path, body) {
-  const res = await fetch(`${auth.apiUrl}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${auth.token}`,
-      "Content-Type": "application/json"
-    },
-    ...body ? { body: JSON.stringify(body) } : {}
-  });
-  const data = await res.json();
+  let res;
+  try {
+    res = await fetch(`${auth.apiUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${auth.token}`,
+        "Content-Type": "application/json"
+      },
+      ...body ? { body: JSON.stringify(body) } : {}
+    });
+  } catch {
+    die(`Can't reach your mkt daemon at ${auth.apiUrl}.
+Check that it's running and that apiUrl in ${AUTH_PATH} is correct (run 'bash deploy.sh' to set up an instance).`);
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    data = undefined;
+  }
   if (!res.ok)
-    die(`API error ${res.status}: ${JSON.stringify(data)}`);
+    die(`API error ${res.status}: ${data === undefined ? res.statusText : JSON.stringify(data)}`);
   return data;
 }
 var MKT_VERSION = "0.1.0";
