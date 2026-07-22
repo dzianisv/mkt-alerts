@@ -1,6 +1,6 @@
 # mkt-alerts
 
-**Self-hosted, programmable market alerts — a TradingView-alerts alternative for AI agents and humans.**
+**Self-hosted, programmable market alerts — run TradingView-style alerts (price, RSI, Pine Script v5) off-platform, with your own notifications (ntfy push, email, Telegram).**
 
 [![npm version](https://img.shields.io/npm/v/@vibetechnologies/mkt-alerts.svg)](https://www.npmjs.com/package/@vibetechnologies/mkt-alerts)
 [![npm downloads](https://img.shields.io/npm/dm/@vibetechnologies/mkt-alerts.svg)](https://www.npmjs.com/package/@vibetechnologies/mkt-alerts)
@@ -126,7 +126,9 @@ plot(fast - slow, "signal")   // >0 when fast is above slow
 
 More real, working examples (RSI on a custom period, a 200DMA break) are in [`skills/mkt-alerts/SKILL.md`](skills/mkt-alerts/SKILL.md#pine-script-alerts---pine--custom-indicators-off-tradingview).
 
-## mkt-alerts vs. TradingView alerts
+## TradingView-style alerts without a TradingView account
+
+mkt-alerts runs TradingView-style alert conditions without needing a TradingView account or subscription. It's an **alerting tool only** — no charts, screener, or analysis platform — so this compares alerting, not the full TradingView product:
 
 | | mkt-alerts | TradingView alerts |
 |---|---|---|
