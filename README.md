@@ -10,6 +10,14 @@ Price and indicator alert daemon you run yourself — price thresholds, RSI/MACD
 
 ## Try it locally in under 2 minutes
 
+```bash
+npx -y @vibetechnologies/mkt-alerts try
+```
+
+Downloads the mkt engine, runs a live price check on localhost, and fires a demo alert — no signup, no clone, no API key.
+
+### What `try` does under the hood (manual walkthrough)
+
 The full loop — define an alert, evaluate it against a **live, no-API-key** quote, get notified — runs entirely on `127.0.0.1` with zero signup. Every command below was actually run and verified end-to-end on a real machine (real BTC-USD price from Coinbase, no VM, no Cloudflare, no account). Scripted back-to-back with `time`, the whole sequence below — binary download, config, daemon start, both `bun install`s, API start, alert add, and the checker firing it — measured **~1.5 seconds of actual command execution**; budget a couple of minutes to read and paste the six blocks:
 
 ```bash
