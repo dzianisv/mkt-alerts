@@ -11,10 +11,10 @@ Price and indicator alert daemon you run yourself — price thresholds, RSI/MACD
 ## Try it locally in under 2 minutes
 
 ```bash
-npx -y @vibetechnologies/mkt-alerts try
+npx -y github:dzianisv/mkt-alerts try
 ```
 
-Downloads the mkt engine, runs a live price check on localhost, and fires a demo alert — no signup, no clone, no API key.
+Downloads the mkt engine, runs a live price check on localhost, and fires a demo alert — no signup, no API key, no manual clone. (Runs straight from the repo; the shorter `npx -y @vibetechnologies/mkt-alerts try` ships with the next npm release.)
 
 ### What `try` does under the hood (manual walkthrough)
 
