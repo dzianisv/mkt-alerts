@@ -71,7 +71,7 @@ Production self-host (systemd, Cloudflare Tunnel, push notifications to your pho
 
 - **Self-hosted, no lock-in.** Your VM (or your laptop), your API token, your alert data — not a vendor's account.
 - **Pine Script v5 without TradingView.** Write real `ta.sma`/`ta.rsi`/custom logic; it runs on your own checker via an isolated PineTS subprocess, not on TradingView's servers or your alert plan's quota.
-- **AI-agent friendly.** A plain CLI + HTTP API that an analysis agent (or you, by hand) can call right after it forms a thesis — see [`skills/mkt-alerts/SKILL.md`](skills/mkt-alerts/SKILL.md).
+- **AI-agent friendly.** A plain CLI + HTTP API that an analysis agent (or you, by hand) can call right after it forms a thesis — see [`skills/mkt-alerts/SKILL.md`](skills/mkt-alerts/SKILL.md). It can even **wake your agent** when an alert fires — see the OpenClaw plugin below.
 - **Evidence-gated, not vibes.** Price alerts (`above`/`below`) require a `--data-source` citing the OHLCV evidence for the level — the CLI refuses to store a fabricated support/resistance line.
 - **Free.** Try it entirely on your own machine (above), or run it 24/7 on a GCP e2-micro free-tier instance; no per-alert or per-check paywall either way.
 
@@ -84,6 +84,23 @@ npx skills add github.com/dzianisv/mkt-alerts/ -s mkt-alerts -y
 ```
 
 Or manually copy `skills/mkt-alerts/SKILL.md` into `~/.claude/skills/mkt-alerts/`.
+
+---
+
+## Wake your AI agent on an alert (OpenClaw plugin)
+
+**Your AI agent wakes up when the market hits your level.** Instead of only sending a push, the [OpenClaw](https://github.com/openclaw/openclaw) plugin runs the mkt-alerts checker *inside* your agent's gateway process — when an alert fires it **wakes the agent** so it acts on the condition automatically, on the last active channel.
+
+```bash
+openclaw plugins install ./integrations/openclaw
+openclaw gateway restart
+```
+
+- **No GCP, no API keys.** Live prices from Coinbase (crypto) and Yahoo Finance (stocks) — public, key-free endpoints; never `mkt.agentlabs.cc`.
+- **No extra process.** Runs as an in-gateway service (`registerService` + `setInterval`) — no separate systemd/pm2 unit.
+- **Zero runtime deps** (Node built-ins only), MIT-licensed. Conditions: threshold / %-change / RSI / SMA-cross / MACD-cross.
+
+Full setup, config schema, and the wake mechanism: [`integrations/openclaw/README.md`](integrations/openclaw/README.md).
 
 ---
 
