@@ -1,34 +1,98 @@
 # mkt-alerts
 
-Price and indicator alert daemon — self-hosted on a **free GCP e2-micro VM**, delivered via **ntfy push** to your phone.
+**Self-hosted, programmable market alerts — a TradingView-alerts alternative for AI agents and humans.**
 
-Deploys [mkt](https://github.com/stxkxs/mkt) as a headless engine behind a **Cloudflare Tunnel** (no open firewall ports).
+[![npm version](https://img.shields.io/npm/v/@vibetechnologies/mkt-alerts.svg)](https://www.npmjs.com/package/@vibetechnologies/mkt-alerts)
+[![npm downloads](https://img.shields.io/npm/dm/@vibetechnologies/mkt-alerts.svg)](https://www.npmjs.com/package/@vibetechnologies/mkt-alerts)
+[![license: MIT](https://img.shields.io/npm/l/@vibetechnologies/mkt-alerts.svg)](https://github.com/dzianisv/mkt-alerts/blob/main/package.json)
+
+Price and indicator alert daemon you run yourself — price thresholds, RSI/MACD/SMA conditions, compound rules, and full **Pine Script v5** custom indicators (evaluated **off TradingView**) — delivered via **ntfy push**, **email**, or **Telegram**.
+
+Deploys [mkt](https://github.com/stxkxs/mkt) as a headless engine on a **free GCP e2-micro VM** behind a **Cloudflare Tunnel** (no open firewall ports). Live demo: **https://mkt.agentlabs.cc**.
+
+## Why mkt-alerts
+
+- **Self-hosted, no lock-in.** Your VM, your API token, your alert data — not a vendor's account.
+- **Pine Script v5 without TradingView.** Write real `ta.sma`/`ta.rsi`/custom logic; it runs on your own checker via an isolated PineTS subprocess, not on TradingView's servers or your alert plan's quota.
+- **AI-agent friendly.** A plain CLI + HTTP API that an analysis agent (or you, by hand) can call right after it forms a thesis — see [`skills/mkt-alerts/SKILL.md`](skills/mkt-alerts/SKILL.md).
+- **Evidence-gated, not vibes.** Price alerts (`above`/`below`) require a `--data-source` citing the OHLCV evidence for the level — the CLI refuses to store a fabricated support/resistance line.
+- **Free.** Runs on a GCP e2-micro free-tier instance; no per-alert or per-check paywall.
+
+## Quickstart
 
 ```bash
-# Subscribe — get your ntfy push URL (open in ntfy app on phone)
+# 1. Subscribe — get your ntfy push URL (open in the ntfy app on your phone)
 npx -y @vibetechnologies/mkt-alerts subscribe
 
-# Add a price alert
+# 2. Add a price alert — --data-source is required for above/below (evidence gate)
 npx -y @vibetechnologies/mkt-alerts add \
   --symbol BTC-USD \
   --condition below --value 90000 \
   --reason "Support break — invalidates bull thesis" \
+  --data-source "200wMA \$62,640 from TradingView 210 weekly bars" \
   --link "https://notion.so/my-analysis"
 
-# Add a compound alert (RSI + price)
+# 3. Add a compound alert (RSI + price — both must be true)
 npx -y @vibetechnologies/mkt-alerts add \
   --symbol AAPL \
   --condition rsi_below --value 30 \
   --condition below --value 200 \
   --reason "Oversold at key support" \
+  --data-source "AAPL 200DMA 200.00, yfinance 1d" \
   --desk stocks
 
-# List active alerts
+# 4. List active alerts
 npx -y @vibetechnologies/mkt-alerts list
 
-# Remove an alert
+# 5. Remove an alert
 npx -y @vibetechnologies/mkt-alerts remove --id <id>
 ```
+
+Prefer running from a clone instead of the published package? `bun mkt-alerts.ts <command>` works identically once `bash deploy.sh` has written `~/.config/mkt-watch/auth.json`.
+
+## Pine Script v5 alerts — custom indicators, off TradingView
+
+Any indicator or period the built-in conditions can't express (RSI is fixed at 14, SMA-cross at 20) can be written as **real Pine Script v5** and run against live OHLCV — no TradingView account needed. The checker evaluates your script every 15 minutes through an **isolated `pine-runner` sidecar** ([LuxAlgo PineTS](https://www.npmjs.com/package/pinets), AGPL-3.0, run as a subprocess — never bundled into the MIT-licensed CLI) and fires through the normal delivery pipeline.
+
+Your script must `plot(<series>, "signal")` — one numeric series the checker reads per bar, encoded so **positive = fire**:
+
+| `--fire-on` | Fires when | Use for |
+|---|---|---|
+| `cross_up` (default) | signal crosses 0 upward (`prev ≤ 0` → `last > 0`) | edge events — a cross, a break, fires once |
+| `truthy` | signal is currently `> 0` | a state — "while oversold", fires on every check it's true |
+
+```bash
+# --pine replaces --condition/--value. --data-source is NOT required (the script is the evidence).
+npx -y @vibetechnologies/mkt-alerts add \
+  --symbol BTC-USD \
+  --pine golden-cross.pine \
+  --signal signal \
+  --fire-on cross_up \
+  --reason "SMA20 crossing above SMA50 confirms trend flip" \
+  --channel email:you@example.com
+```
+
+`golden-cross.pine`:
+```pine
+//@version=5
+indicator("golden cross")
+fast = ta.sma(close, 20)
+slow = ta.sma(close, 50)
+plot(fast - slow, "signal")   // >0 when fast is above slow
+```
+
+More real, working examples (RSI on a custom period, a 200DMA break) are in [`skills/mkt-alerts/SKILL.md`](skills/mkt-alerts/SKILL.md#pine-script-alerts---pine--custom-indicators-off-tradingview).
+
+## mkt-alerts vs. TradingView alerts
+
+| | mkt-alerts | TradingView alerts |
+|---|---|---|
+| Hosting | Self-hosted, your own VM | TradingView's infrastructure |
+| Cost | Free (GCP e2-micro free tier) | Paid plans gate alert count/frequency |
+| Custom Pine Script | Runs off-platform via an isolated PineTS sidecar | Requires an active TradingView plan |
+| Data ownership | Your VM, your API token | Vendor-hosted account |
+| Interface | CLI + HTTP API — scriptable, agent-callable | UI-driven |
+| Delivery | ntfy push, email, Telegram bot | App push, email, webhooks (paid tiers) |
 
 ---
 
@@ -68,35 +132,23 @@ Re-run any time to redeploy — idempotent.
 
 ---
 
-## Setting alerts
+## Setting alerts from a clone
 
-Use the included CLI — no SSH needed after `deploy.sh` runs.
+No SSH needed after `deploy.sh` runs — the CLI talks to your VM over HTTPS using the token `deploy.sh` wrote to `~/.config/mkt-watch/auth.json`. Same commands as the Quickstart above, run via `bun mkt-alerts.ts <command>` instead of `npx -y @vibetechnologies/mkt-alerts <command>`:
 
-**Get your subscribe URL:**
 ```bash
 bun mkt-alerts.ts subscribe
-# → https://ntfy.sh/mkt-a3f9c1e72d4b8e3f
-# Open ntfy app on your phone and subscribe to that URL
-```
+# → https://ntfy.sh/mkt-a3f9c1e72d4b8e3f — open in the ntfy app on your phone
 
-**Add an alert:**
-```bash
 bun mkt-alerts.ts add \
   --symbol BTC-USD \
-  --condition below \
-  --value 90000 \
+  --condition below --value 90000 \
   --reason "Support break — exit signal" \
+  --data-source "200wMA \$62,640 from TradingView 210 weekly bars" \
   --link "https://your-analysis-url"
 # channel defaults to your ntfy topic — no --channel needed
-```
 
-**List active alerts:**
-```bash
 bun mkt-alerts.ts list
-```
-
-**Remove an alert:**
-```bash
 bun mkt-alerts.ts remove --id <id>
 ```
 
@@ -108,13 +160,14 @@ Alerts are checked every 15 minutes. When a condition fires you get a push notif
 
 | Condition | Meaning |
 |---|---|
-| `above` / `below` | price crosses threshold |
+| `above` / `below` | price crosses threshold (**requires `--data-source`**) |
 | `pct_up` / `pct_down` | price moves X% from current |
-| `rsi_above` / `rsi_below` | RSI crosses value |
-| `sma_cross_above` / `sma_cross_below` | price crosses SMA |
+| `rsi_above` / `rsi_below` | RSI(14) crosses value |
+| `sma_cross_above` / `sma_cross_below` | price crosses SMA(20) |
 | `macd_cross` | MACD line crosses signal |
+| `pine` | custom Pine Script v5 signal — set via `--pine <file>`, not `--condition pine` directly (see [Pine Script alerts](#pine-script-v5-alerts--custom-indicators-off-tradingview)) |
 
-Supports stocks (`AAPL`, `CRM`) and crypto (`BTC-USD`, `ETH-USD`, `AAVE-USD`).
+Repeat `--condition`/`--value` pairs for a compound alert (all conditions must be true). Supports stocks (`AAPL`, `CRM`) and crypto (`BTC-USD`, `ETH-USD`, `AAVE-USD`). Built-in indicator periods are fixed (RSI 14, SMA 20) — for any other period or a custom indicator, use a [Pine Script alert](#pine-script-v5-alerts--custom-indicators-off-tradingview) or a computed price level.
 
 ---
 
