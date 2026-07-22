@@ -1,4 +1,5 @@
 ---
+name: mkt-alerts
 description: Set, list, and remove price/indicator alerts on the self-hosted mkt daemon via the mkt-alerts CLI. Use when analysis concludes with a specific, deterministic entry/exit level worth monitoring (e.g. "alert me if BTC closes below 90000", "RSI oversold on AAPL"), or when turning a Watchlist trigger row into a live alert. Also supports Pine Script v5 alerts (run off-TradingView via an isolated PineTS sidecar) for any custom indicator/period the fixed built-in conditions can't express. Handles auth (bearer token from ~/.config/mkt-watch/auth.json), multi-channel delivery (ntfy push, email, Telegram), and the mandatory data-source evidence gate for price levels. Not for one-off "sell now" decisions (those have no monitorable condition) or calendar reminders — the daemon only evaluates price/indicator conditions.
 ---
 

@@ -1,0 +1,6 @@
+{
+  "$schema": "https://skills.sh/schemas/skills.sh.schema.json",
+  "groupings": [
+    { "title": "Market alerts", "description": "Self-hosted price / indicator / Pine Script alerting for AI agents.", "skills": ["mkt-alerts"] }
+  ]
+}

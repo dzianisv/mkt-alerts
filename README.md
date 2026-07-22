@@ -40,7 +40,7 @@ Agents (stocks-advisor, crypto-advisor, multi-lens-quorum) can set alerts automa
 npx skills add github.com/dzianisv/mkt-alerts/ -s mkt-alerts -y
 ```
 
-Or manually copy `.claude/skills/mkt-alerts/SKILL.md` into `~/.claude/skills/mkt-alerts/`.
+Or manually copy `skills/mkt-alerts/SKILL.md` into `~/.claude/skills/mkt-alerts/`.
 
 ---
 
