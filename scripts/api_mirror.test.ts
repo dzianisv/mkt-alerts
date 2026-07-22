@@ -30,7 +30,7 @@ process.env.NTFY_TOPIC = "mkt-testglobal"; // the daemon's global push topic
 // Seed a minimal mkt config so loadMktConfig()/saveMktConfig() work.
 writeFileSync(MKT_CONFIG, "watchlist: []\nportfolios: []\nalerts: []\npoll_interval: 15m\n");
 
-const { handleRequest } = await import("./api.ts");
+const { handleRequest, isMktSystemdManaged } = await import("./api.ts");
 const { loadJobs, resolveChannelSpec } = await import("./store.ts");
 const { evaluateJob, buildAlertMessage, notify } = await import("./check.ts");
 
@@ -356,5 +356,40 @@ describe("POST channel validation + fail-loud persistence", () => {
     expect(res.status).toBe(201);
     expect(existsSync(MKT_CONFIG)).toBe(true);
     expect(configHasSymbol("BOOTSTRAP-USD")).toBe(true);
+  });
+});
+
+describe("restartMkt() systemd-managed detection (Bug 1 — local daemon restart safety)", () => {
+  test("a bogus/non-existent unit name is never reported as managed", () => {
+    // Whatever this test box's `systemctl` situation is (present or absent),
+    // a unit that cannot exist must resolve to unmanaged — this must never throw.
+    expect(isMktSystemdManaged("mkt-daemon-unit-that-does-not-exist-xyz")).toBe(false);
+  });
+
+  test("never throws, and resolves to unmanaged, when systemctl is absent from PATH", () => {
+    // This CI/dev box has no systemd (confirmed: `which systemctl` fails here),
+    // so this documents the exact local-dev scenario Bug 1 fixes: restartMkt()
+    // must skip SIGTERM instead of throwing or blindly killing `mkt`.
+    if (Bun.which("systemctl")) return; // skip assertion on a real systemd host
+    expect(() => isMktSystemdManaged("mkt-daemon")).not.toThrow();
+    expect(isMktSystemdManaged("mkt-daemon")).toBe(false);
+  });
+});
+
+describe("GET /alerts response shape (Bug 2 — blank REASON column)", () => {
+  test("every entry in the GET /alerts list carries `reasoning` mirroring `reason`", async () => {
+    const created = await (await handleRequest(req("POST", "/alerts", {
+      symbol: "REASON-CHECK-USD",
+      reasoning: "confirms the CLI REASON column is never blank",
+      conditions: [{ condition: "below", value: 1 }],
+      channels: ["email:reason-check@example.com"], // checker-only → stays in meta
+    }))).json() as any;
+
+    const list = await (await handleRequest(req("GET", "/alerts"))).json() as any[];
+    const entry = list.find((a: any) => a.id === created.id);
+    expect(entry).toBeDefined();
+    expect(entry.reason).toBe("confirms the CLI REASON column is never blank");
+    // This is exactly what mkt-alerts.ts `list` reads for the REASON column.
+    expect(entry.reasoning).toBe(entry.reason);
   });
 });
