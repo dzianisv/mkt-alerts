@@ -180,8 +180,44 @@ function saveMktConfig(cfg: MktConfig): void {
 
 // ── Daemon restart ────────────────────────────────────────────────────────────
 
+// The systemd unit that supervises `mkt daemon` on the prod VM (see deploy.sh:
+// `sudo tee /etc/systemd/system/mkt-daemon.service` with `Restart=always`).
+const MKT_SYSTEMD_UNIT = "mkt-daemon";
+
+// Whether the `mkt` process on THIS host is actually supervised by systemd unit
+// `mkt-daemon`. On the prod VM this is true, so SIGTERMing mkt below is safe —
+// systemd's `Restart=always` immediately respawns it, picking up the freshly
+// written config.yaml. On a local dev box (no systemd at all — e.g. macOS — or
+// a Linux box where the operator started `mkt` by hand outside systemd) there
+// is nothing to respawn it, so SIGTERM would kill mkt for good, breaking the
+// README's "try it locally in 60 seconds" flow.
+//
+// `systemctl is-active --quiet <unit>` is the standard way to ask systemd this
+// question; it exits 0 only when the unit is currently active, and non-zero
+// for inactive/failed/unknown units. `Bun.spawnSync` + try/catch means a box
+// with no `systemctl` on PATH at all (macOS, containers without systemd) fails
+// safely into "unmanaged" instead of throwing an uncaught exception.
+//
+// Kept separate from restartMkt() so it's independently unit-testable.
+export function isMktSystemdManaged(unit: string = MKT_SYSTEMD_UNIT): boolean {
+  try {
+    const result = Bun.spawnSync(["systemctl", "is-active", "--quiet", unit]);
+    return result.exitCode === 0;
+  } catch {
+    return false; // no systemctl on PATH (e.g. macOS dev box) — treat as unmanaged
+  }
+}
+
 async function restartMkt(): Promise<void> {
   try {
+    if (!isMktSystemdManaged()) {
+      console.warn(
+        `[mkt] restart skipped — no service manager detected (systemd unit '${MKT_SYSTEMD_UNIT}' not active); ` +
+        `new alert config applies on next manual mkt restart`
+      );
+      return;
+    }
+
     const proc = Bun.spawn(["pgrep", "-x", "mkt"], { stdout: "pipe", stderr: "pipe" });
     const out  = await new Response(proc.stdout).text();
     const pid  = parseInt(out.trim());
@@ -349,7 +385,11 @@ async function handleGetAlerts(): Promise<Response> {
     if (!usedMetaIds.has(m.id)) enriched.push(m);
   }
 
-  return json(enriched);
+  // Include `reasoning` (mirrors `reason`) on every entry so the CLI, which
+  // reads `job.reasoning` for its REASON column (see mkt-alerts.ts `list`),
+  // displays the thesis instead of a blank column. Same alias pattern already
+  // used by the POST /alerts response below.
+  return json(enriched.map(m => ({ ...m, reasoning: m.reason })));
 }
 
 export async function handlePostAlert(req: Request): Promise<Response> {
