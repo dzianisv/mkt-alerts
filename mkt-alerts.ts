@@ -52,16 +52,26 @@ function flagAll(args: string[], name: string): string[] {
 }
 
 async function api(auth: Auth, method: string, path: string, body?: unknown): Promise<unknown> {
-  const res = await fetch(`${auth.apiUrl}${path}`, {
+  let res: Response;
+  try {
+    res = await fetch(`${auth.apiUrl}${path}`, {
     method,
     headers: {
       "Authorization": `Bearer ${auth.token}`,
       "Content-Type": "application/json",
     },
     ...(body ? { body: JSON.stringify(body) } : {}),
-  });
-  const data = await res.json();
-  if (!res.ok) die(`API error ${res.status}: ${JSON.stringify(data)}`);
+    });
+  } catch {
+    die(`Can't reach your mkt daemon at ${auth.apiUrl}.\nCheck that it's running and that apiUrl in ${AUTH_PATH} is correct (run 'bash deploy.sh' to set up an instance).`);
+  }
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch {
+    data = undefined;
+  }
+  if (!res.ok) die(`API error ${res.status}: ${data === undefined ? res.statusText : JSON.stringify(data)}`);
   return data;
 }
 
