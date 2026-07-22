@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * mkt-alerts — manage alerts on the remote mkt daemon via HTTP API
  *
