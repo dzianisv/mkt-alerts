@@ -33,6 +33,7 @@ describe("buildAlertMessage", () => {
     expect(m.body).toContain("Current:  88123.45");                            // current value
     expect(m.body).toContain("Trigger:  below @ 90000");                       // trigger
     expect(m.body).toContain("Analysis: https://notion.so/x");                 // link
+    expect(m.body).toContain("— mkt-alerts · https://github.com/dzianisv/mkt-alerts"); // provenance footer
   });
 
   test("compound conditions join with AND", () => {
