@@ -13,6 +13,15 @@ function loadAuth() {
 Run 'bash deploy.sh' first.`);
   return JSON.parse(readFileSync(AUTH_PATH, "utf8"));
 }
+function tryLoadAuth() {
+  if (!existsSync(AUTH_PATH))
+    return null;
+  try {
+    return JSON.parse(readFileSync(AUTH_PATH, "utf8"));
+  } catch {
+    return null;
+  }
+}
 function die(msg) {
   console.error(`error: ${msg}`);
   process.exit(1);
@@ -51,6 +60,30 @@ Check that it's running and that apiUrl in ${AUTH_PATH} is correct (run 'bash de
   }
   if (!res.ok)
     die(`API error ${res.status}: ${data === undefined ? res.statusText : JSON.stringify(data)}`);
+  return data;
+}
+async function apiRaw(auth, method, path, body) {
+  let res;
+  try {
+    res = await fetch(`${auth.apiUrl}${path}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${auth.token}`,
+        "Content-Type": "application/json"
+      },
+      ...body ? { body: JSON.stringify(body) } : {}
+    });
+  } catch {
+    throw new Error(`Can't reach the mkt daemon at ${auth.apiUrl}. Check it's running and that apiUrl in ${AUTH_PATH} is correct (run 'bash deploy.sh').`);
+  }
+  let data;
+  try {
+    data = await res.json();
+  } catch {
+    data = undefined;
+  }
+  if (!res.ok)
+    throw new Error(`API error ${res.status}: ${data === undefined ? res.statusText : JSON.stringify(data)}`);
   return data;
 }
 var MKT_VERSION = "0.1.0";
@@ -240,6 +273,243 @@ ${daemonOutput.trim()}` : "The mkt engine produced no output."));
   console.log(`        --channel ntfy:my-topic`);
   console.log(``);
 }
+var MCP_PROTOCOL_VERSION = "2024-11-05";
+var MCP_CONDITIONS = [
+  "above",
+  "below",
+  "pct_up",
+  "pct_down",
+  "rsi_above",
+  "rsi_below",
+  "sma_cross_above",
+  "sma_cross_below",
+  "macd_cross",
+  "volume_above",
+  "stddev_above"
+];
+var MCP_CHANNEL_PREFIXES = ["email:", "telegram:", "telegram-bot:", "ntfy:", "stdout"];
+var MCP_TOOLS = [
+  {
+    name: "list_alerts",
+    description: "List all active market alerts on the configured mkt daemon.",
+    inputSchema: { type: "object", properties: {}, additionalProperties: false }
+  },
+  {
+    name: "add_alert",
+    description: "Create a market alert (price/RSI/MACD/SMA or inline Pine Script v5). " + "Price conditions (above/below) require data_source evidence.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        symbol: { type: "string", description: 'Ticker, e.g. "BTC-USD", "AAPL". Upper-cased before send.' },
+        reason: { type: "string", description: "Why this alert exists." },
+        conditions: {
+          type: "array",
+          description: "Threshold conditions; mutually exclusive with pine_script.",
+          items: {
+            type: "object",
+            properties: {
+              condition: { type: "string", enum: MCP_CONDITIONS },
+              value: { type: "number" }
+            },
+            required: ["condition", "value"],
+            additionalProperties: false
+          }
+        },
+        pine_script: { type: "string", description: "Inline Pine Script v5 source; mutually exclusive with conditions." },
+        signal: { type: "string", description: 'Pine plot that carries the signal (default "signal"). Only with pine_script.' },
+        fire_on: { type: "string", enum: ["cross_up", "truthy"], description: "When a pine alert fires (default cross_up). Only with pine_script." },
+        data_source: { type: "string", description: "Evidence for the level. REQUIRED when any condition is above/below." },
+        desk: { type: "string", description: 'Desk (default "crypto").' },
+        link: { type: "string", description: "Optional analysis URL shown in the notification." },
+        cooldown: { type: "number", description: "Re-alert after N seconds (default: one-shot)." },
+        channels: { type: "array", items: { type: "string" }, description: "Delivery channels: email:, telegram:, telegram-bot:, ntfy:, stdout." }
+      },
+      required: ["symbol", "reason"],
+      additionalProperties: false
+    }
+  },
+  {
+    name: "remove_alert",
+    description: "Remove an alert by id.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "Alert id" } },
+      required: ["id"],
+      additionalProperties: false
+    }
+  }
+];
+function mcpServerVersion() {
+  for (const rel of ["./package.json", "../package.json"]) {
+    try {
+      const pkg = JSON.parse(readFileSync(new URL(rel, import.meta.url), "utf8"));
+      if (typeof pkg.version === "string" && pkg.version)
+        return pkg.version;
+    } catch {}
+  }
+  return "1.1.0";
+}
+async function mcpCallTool(name, rawArgs) {
+  const auth = tryLoadAuth();
+  if (!auth)
+    throw new Error(`Config not found: ${AUTH_PATH}. Run 'bash deploy.sh' first to set your mkt daemon URL + token.`);
+  const a = rawArgs ?? {};
+  if (name === "list_alerts") {
+    const result = await apiRaw(auth, "GET", "/alerts");
+    return JSON.stringify(result, null, 2);
+  }
+  if (name === "remove_alert") {
+    const id = typeof a.id === "string" ? a.id.trim() : "";
+    if (!id)
+      throw new Error("id required");
+    await apiRaw(auth, "DELETE", `/alerts/${encodeURIComponent(id)}`);
+    return `removed ${id}`;
+  }
+  if (name === "add_alert") {
+    const symbol = typeof a.symbol === "string" ? a.symbol.trim() : "";
+    if (!symbol)
+      throw new Error("symbol required");
+    const reason = typeof a.reason === "string" ? a.reason.trim() : "";
+    if (!reason)
+      throw new Error("reason required");
+    const pineScript = typeof a.pine_script === "string" && a.pine_script.trim() ? a.pine_script : "";
+    const rawConditions = Array.isArray(a.conditions) ? a.conditions : [];
+    let builtConditions;
+    let priceConditions = [];
+    if (pineScript) {
+      if (rawConditions.length)
+        throw new Error("provide either conditions or pine_script, not both");
+      const fireOn = typeof a.fire_on === "string" ? a.fire_on : "cross_up";
+      if (fireOn !== "cross_up" && fireOn !== "truthy")
+        throw new Error('fire_on must be "cross_up" or "truthy"');
+      const signalPlot = typeof a.signal === "string" && a.signal ? a.signal : "signal";
+      builtConditions = [{ condition: "pine", value: 0, script: pineScript, signalPlot, fireOn }];
+    } else {
+      if (!rawConditions.length)
+        throw new Error("conditions (non-empty) or pine_script is required");
+      builtConditions = rawConditions.map((c, i) => {
+        const co = c ?? {};
+        const condition = typeof co.condition === "string" ? co.condition : "";
+        if (!MCP_CONDITIONS.includes(condition))
+          throw new Error(`invalid condition "${condition}" at index ${i}. Valid: ${MCP_CONDITIONS.join(", ")}`);
+        const value = typeof co.value === "number" ? co.value : NaN;
+        if (!Number.isFinite(value))
+          throw new Error(`condition "${condition}" at index ${i} needs a numeric value`);
+        return { condition, value };
+      });
+      priceConditions = builtConditions.map((c) => c.condition).filter((c) => c === "above" || c === "below");
+    }
+    const channels = Array.isArray(a.channels) ? a.channels.map((x) => String(x)) : [];
+    for (const ch of channels) {
+      if (!MCP_CHANNEL_PREFIXES.some((p) => ch === p || ch.startsWith(p)))
+        throw new Error(`invalid channel "${ch}". Use one of: ${MCP_CHANNEL_PREFIXES.join(", ")}<target>`);
+      if (ch.startsWith("email:") && !/^email:[^@\s]+@[^@\s]+\.[^@\s]+$/.test(ch))
+        throw new Error(`invalid email recipient in "${ch}". Use email:you@example.com`);
+    }
+    const dataSource = typeof a.data_source === "string" ? a.data_source.trim() : "";
+    if (priceConditions.length > 0 && !dataSource) {
+      throw new Error(`data_source required for price conditions (above/below). ` + `Pull OHLCV data first, then cite the evidence for the level. ` + `No data source = no alert. Do not fabricate support levels.`);
+    }
+    const finalReasoning = priceConditions.length > 0 ? `${reason} [data: ${dataSource}]` : reason;
+    const desk = typeof a.desk === "string" && a.desk ? a.desk : "crypto";
+    const link = typeof a.link === "string" && a.link ? a.link : undefined;
+    const cooldown = typeof a.cooldown === "number" && Number.isFinite(a.cooldown) ? a.cooldown : undefined;
+    const body = {
+      symbol: symbol.toUpperCase(),
+      reasoning: finalReasoning,
+      desk,
+      conditions: builtConditions,
+      ...link ? { analysisLink: link } : {},
+      ...cooldown !== undefined ? { cooldownSec: cooldown } : {},
+      ...channels.length ? { channels } : {}
+    };
+    const job = await apiRaw(auth, "POST", "/alerts", body);
+    return JSON.stringify(job, null, 2);
+  }
+  throw new Error(`unknown tool: ${name}`);
+}
+function mcpWrite(obj) {
+  process.stdout.write(JSON.stringify(obj) + `
+`);
+}
+async function handleMcpMessage(msg) {
+  const hasId = msg && msg.id !== undefined && msg.id !== null;
+  const method = msg?.method;
+  if (!hasId)
+    return;
+  const id = msg.id;
+  try {
+    if (method === "initialize") {
+      const pv = msg.params?.protocolVersion;
+      mcpWrite({
+        jsonrpc: "2.0",
+        id,
+        result: {
+          protocolVersion: typeof pv === "string" ? pv : MCP_PROTOCOL_VERSION,
+          capabilities: { tools: {} },
+          serverInfo: { name: "mkt-alerts", version: mcpServerVersion() }
+        }
+      });
+      return;
+    }
+    if (method === "ping") {
+      mcpWrite({ jsonrpc: "2.0", id, result: {} });
+      return;
+    }
+    if (method === "tools/list") {
+      mcpWrite({ jsonrpc: "2.0", id, result: { tools: MCP_TOOLS } });
+      return;
+    }
+    if (method === "tools/call") {
+      const toolName = msg.params?.name;
+      const toolArgs = msg.params?.arguments;
+      try {
+        const text = await mcpCallTool(toolName, toolArgs);
+        mcpWrite({ jsonrpc: "2.0", id, result: { content: [{ type: "text", text }] } });
+      } catch (e) {
+        mcpWrite({
+          jsonrpc: "2.0",
+          id,
+          result: { content: [{ type: "text", text: e.message }], isError: true }
+        });
+      }
+      return;
+    }
+    mcpWrite({ jsonrpc: "2.0", id, error: { code: -32601, message: `Method not found: ${method}` } });
+  } catch (e) {
+    mcpWrite({ jsonrpc: "2.0", id, error: { code: -32603, message: `Internal error: ${e.message}` } });
+  }
+}
+async function runMcpServer() {
+  process.stdin.setEncoding("utf8");
+  let buffer = "";
+  let chain = Promise.resolve();
+  process.stdin.on("data", (chunk) => {
+    buffer += chunk;
+    let idx;
+    while ((idx = buffer.indexOf(`
+`)) !== -1) {
+      const line = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 1);
+      const trimmed = line.trim();
+      if (!trimmed)
+        continue;
+      let msg;
+      try {
+        msg = JSON.parse(trimmed);
+      } catch {
+        mcpWrite({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } });
+        continue;
+      }
+      chain = chain.then(() => handleMcpMessage(msg)).catch(() => {});
+    }
+  });
+  await new Promise((resolve) => {
+    process.stdin.on("end", resolve);
+    process.stdin.on("close", resolve);
+  });
+  await chain;
+}
 var args = process.argv.slice(2);
 var sub = args[0];
 if (!sub || sub === "--help" || sub === "-h") {
@@ -264,6 +534,7 @@ commands:
                                   ntfy:my-topic   (default: your ntfy topic)
   list                          list active alerts
   remove  --id <id>             remove alert by ID
+  mcp                           run as an MCP server (stdio) for AI agents (Claude Desktop/Code)
 
 valid conditions:
   above, below, pct_up, pct_down,
@@ -284,6 +555,10 @@ if (sub === "try") {
     process.exit(143);
   });
   await runTry();
+  process.exit(0);
+}
+if (sub === "mcp") {
+  await runMcpServer();
   process.exit(0);
 }
 var auth = loadAuth();
