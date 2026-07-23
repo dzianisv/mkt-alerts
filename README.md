@@ -89,6 +89,31 @@ Or manually copy `skills/mkt-alerts/SKILL.md` into `~/.claude/skills/mkt-alerts/
 
 ---
 
+## MCP server (use from an AI agent)
+
+Run mkt-alerts as a native **MCP (Model Context Protocol) stdio server** so any MCP host (Claude Desktop, Claude Code, …) can create, list, and remove alerts as tool calls:
+
+- **`list_alerts`** — list all active alerts.
+- **`add_alert`** — create a price / RSI / MACD / SMA alert or an inline Pine Script v5 alert. `above`/`below` price conditions require a `data_source` (same evidence gate as the CLI).
+- **`remove_alert`** — remove an alert by id.
+
+Claude Desktop / Claude Code config:
+
+```json
+{
+  "mcpServers": {
+    "mkt-alerts": {
+      "command": "npx",
+      "args": ["-y", "github:dzianisv/mkt-alerts", "mcp"]
+    }
+  }
+}
+```
+
+It reads the daemon URL + token from `~/.config/mkt-watch/auth.json` (run `bash deploy.sh` first), exactly like the CLI. No dependencies — plain JSON-RPC 2.0 over stdio.
+
+---
+
 ## Wake your AI agent on an alert (OpenClaw plugin)
 
 **Your AI agent wakes up when the market hits your level.** Instead of only sending a push, the [OpenClaw](https://github.com/openclaw/openclaw) plugin runs the mkt-alerts checker *inside* your agent's gateway process — when an alert fires it **wakes the agent** so it acts on the condition automatically, on the last active channel.
