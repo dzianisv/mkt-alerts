@@ -6,3 +6,8 @@
 .cache/
 scripts/node_modules/
 scripts/bun.lock
+
+# agent-local state
+.agents/
+.supervisor/
+*.tgz
