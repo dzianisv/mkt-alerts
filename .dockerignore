@@ -1,0 +1,16 @@
+.git
+.github
+node_modules
+dist
+scripts
+skills
+docs
+integrations
+*.md
+!README.md
+.agents
+.supervisor
+.cache
+deploy.sh
+LICENSE
+.gitignore

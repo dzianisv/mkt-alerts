@@ -112,6 +112,21 @@ Claude Desktop / Claude Code config:
 
 It reads the daemon URL + token from `~/.config/mkt-watch/auth.json` (run `bash deploy.sh` first), exactly like the CLI. No dependencies — plain JSON-RPC 2.0 over stdio.
 
+**Docker:** `docker build -t mkt-alerts .` then run the MCP server in a container:
+
+```json
+{
+  "mcpServers": {
+    "mkt-alerts": {
+      "command": "docker",
+      "args": ["run", "--rm", "-i",
+        "-v", "${HOME}/.config/mkt-watch:/root/.config/mkt-watch:ro",
+        "mkt-alerts"]
+    }
+  }
+}
+```
+
 ---
 
 ## Wake your AI agent on an alert (OpenClaw plugin)
