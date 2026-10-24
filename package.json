@@ -8,6 +8,8 @@
   },
   "scripts": {
     "build": "bun build mkt-alerts.ts --outfile dist/mkt-alerts.js --target node",
+    "test": "bun test",
+    "test:pine": "cd pine-runner && bun run selftest",
     "prepublishOnly": "bun run build"
   },
   "files": [
